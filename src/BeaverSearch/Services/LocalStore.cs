@@ -12,6 +12,10 @@ public sealed class LocalStore
     private readonly string _serversPath;
     private readonly JsonSerializerOptions _json = new() { WriteIndented = true };
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _cacheSaveSync = new();
+    private CacheState? _pendingCache;
+    private int _cacheSaveRevision;
+    private Task _cacheSaveTask = Task.CompletedTask;
 
     public LocalStore()
     {
@@ -54,7 +58,17 @@ public sealed class LocalStore
         return cache;
     }
 
-    public Task SaveCacheAsync(CacheState cache) => WriteAsync(_cachePath, cache);
+    public Task SaveCacheAsync(CacheState cache)
+    {
+        lock (_cacheSaveSync)
+        {
+            _pendingCache = cache;
+            _cacheSaveRevision++;
+            if (_cacheSaveTask.IsCompleted)
+                _cacheSaveTask = FlushCacheLoopAsync();
+            return _cacheSaveTask;
+        }
+    }
 
     public async Task<List<ServerEntry>> LoadServersAsync() =>
         await ReadAsync(_serversPath, new List<ServerEntry>()).ConfigureAwait(false);
@@ -65,6 +79,36 @@ public sealed class LocalStore
             Address = s.Address,
             Enabled = s.Enabled
         }).ToList());
+
+    private async Task FlushCacheLoopAsync()
+    {
+        while (true)
+        {
+            // Collapse the burst produced when dozens of newly discovered players
+            // finish almost together into one physical JSON serialization/write.
+            await Task.Delay(550).ConfigureAwait(false);
+
+            CacheState? cache;
+            int revision;
+            lock (_cacheSaveSync)
+            {
+                cache = _pendingCache;
+                revision = _cacheSaveRevision;
+            }
+
+            if (cache is not null)
+                await WriteAsync(_cachePath, cache).ConfigureAwait(false);
+
+            lock (_cacheSaveSync)
+            {
+                if (revision == _cacheSaveRevision)
+                {
+                    _pendingCache = null;
+                    return;
+                }
+            }
+        }
+    }
 
     private async Task<T> ReadAsync<T>(string path, T fallback)
     {
