@@ -1,36 +1,44 @@
 # BeaverSearch v0.4.1 FixSteamID
 
-Дата: 2026-09-07.
+Дата: 2026-09-08.
+
+## FixSteamID r4 — CDP/API/WebSocket resolver
+
+- Исправлен compile-time дефект первой CDP-ревизии: `async`-методы больше не используют запрещённые `ref/out` параметры; счётчик команд хранится в состоянии CDP-сессии.
+- `RenderedDomLoader` переведён с одного `--dump-dom` на Chromium DevTools Protocol как основной механизм; `--dump-dom` оставлен fallback.
+- Перед навигацией включается `Network` domain DevTools, поэтому BeaverSearch видит реальные `Network.responseReceived` и может прочитать response body через `Network.getResponseBody`.
+- Перехватываются `XHR`, `fetch`, `EventSource` и JSON-ответы независимо от того, содержит ли URL слова `api`, `player` или `server`.
+- Разрешён захват публичных endpoint на поддоменах того же проекта (например API/cloud host), а статические JS/CSS/images/fonts отбрасываются.
+- Добавлен захват текстовых `Network.webSocketFrameReceived`. Socket.IO-префиксы нормализуются перед разбором JSON.
+- JSON из DOM/API/WebSocket добавляется во внутренний parser stream и проходит существующий безопасный resolver Steam identity.
+- yooma route `/card/<SteamID64>` поддерживается как прямой источник SteamID64 наряду с `/profile/<SteamID64>` и явными steam/account полями.
+- Browser probe больше не выстраивает все страницы в длинную очередь: одновременно заняты максимум 2 Chromium slot; остальные страницы откладываются на следующий monitoring cycle. Успешные probes кэшируются, поэтому обход продвигается rolling-образом.
+- Для fallback `--dump-dom` используется отдельный temporary profile, чтобы не конфликтовать с уже закрывающимся DevTools browser profile.
+- `%LOCALAPPDATA%\BeaverSearch\source-probe.log` пишет `cards/loading/clicks/identities`, resource count, replay JSON, Network JSON, WebSocket frames и обнаруженные endpoint URL.
+- Пользовательский Edge/Chrome profile, cookies и авторизация не читаются: каждый probe использует отдельную временную директорию.
 
 ## FixSteamID r3 — live source hotfix
 
-- Исправлено зависание первого цикла на `0 / 0`: browser probe больше не блокирует возврат HTTP/server catalog snapshot.
-- Edge/Chrome теперь подключается через Chrome DevTools Protocol (CDP), а не только `--dump-dom`.
-- Browser probe собирает итоговый DOM, публичные XHR/fetch response bodies, WebSocket frames и EventSource messages.
-- Исправлен потенциальный вечный hang при закрытии CDP WebSocket: disposable connection завершается через `Abort()` с коротким wait.
-- Удалён `--disable-background-networking`, который мог мешать live-запросам SPA.
-- Добавлен короткий scroll sweep для lazy-rendered server/player blocks.
-- yooma HTTP-каталог опрашивает только актуальные публичные routes; stale DM/RETAKE/numeric routes удалены.
+- Исправлено зависание первого цикла на `0 / 0`: browser probe больше не должен удерживать все monitoring pages в последовательной очереди.
+- Подготовлен общий browser/data layer для yooma.su и CYBERSHOKE.
+- Добавлена диагностика `%LOCALAPPDATA%\BeaverSearch\source-probe.log`.
 - CYBERSHOKE server cards нормализуются после React comment/span splitting (`#41`, `15/16 | map`).
-- HTTP pages обоих источников загружаются параллельно и возвращаются в UI без ожидания браузера; browser probe идёт по 1 странице на источник в фоне.
-- Добавлены counters захваченных API/WS payloads и `%LOCALAPPDATA%\BeaverSearch\source-probe.log` с endpoint telemetry.
 
 ## FixSteamID revision — yooma.su + CYBERSHOKE
 
-- Исправлена причина `0 / 0`: обычный HttpClient больше не считается достаточным для JS-rendered monitoring pages.
-- `YoomaClient` анализирует HTTP markup + hydration + rendered DOM/network state.
+- Старый resolver `A2S/GAMEMONITORING → nickname → SteamID` выведен из runtime pipeline.
+- `YoomaClient` анализирует HTTP markup, hydration, rendered DOM и browser-captured public data.
 - Добавлен `CybershokeClient` для публичных CS2 mode/server pages CYBERSHOKE.
-- CYBERSHOKE работает rolling batch по 8 страниц и объединяет свежие snapshots, чтобы не создавать десятки browser processes за цикл.
 - SteamID64 читается непосредственно из player element/state/profile link.
-- Добавлена поддержка `data-steamid`, steam/account fields, Steam Community profile URLs и site profile URLs.
+- Добавлена поддержка `data-steamid`, steam/account fields, Steam Community profile URLs и site profile/card URLs.
 - Добавлен `SteamIdentityParser`: Steam AccountID, Steam2 и Steam3 детерминированно переводятся в SteamID64.
-- Никнейм больше нигде не используется как resolver личности.
+- Никнейм нигде не используется как resolver личности.
 - Один и тот же SteamID, найденный одновременно на yooma.su и CYBERSHOKE, попадает под общий 24h cache и global scan gate.
 
 ## UI / diagnostics
 
-- Monitoring и Servers теперь показывают общий каталог yooma.su + CYBERSHOKE.
-- Diagnostics разделяет counters обоих источников и показывает DOM/render progress.
+- Monitoring и Servers показывают общий каталог yooma.su + CYBERSHOKE.
+- Diagnostics разделяет counters обоих источников и показывает render progress.
 - Settings показывает оба monitoring provider.
 - Splash: `yooma + CYBER → SteamID → Inventory → Price Engine`.
 - Ручные server entries помечаются `Ручной`, а не `yooma.su profile`.
