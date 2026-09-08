@@ -6,6 +6,7 @@ title BeaverSearch Launcher v0.4.1 FixSteamID
 set "LOG_PATH=%LOCALAPPDATA%\BeaverSearch\startup.log"
 set "PROJECT=.\src\BeaverSearch\BeaverSearch.csproj"
 set "APP_EXE=.\src\BeaverSearch\bin\Debug\net8.0-windows\BeaverSearch.exe"
+set "OBJ_DIR=.\src\BeaverSearch\obj"
 
 echo ========================================
 echo        BeaverSearch - Launcher v0.4.1 FixSteamID
@@ -53,6 +54,16 @@ echo Running static preflight...
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\STATIC-PREFLIGHT.ps1"
 if errorlevel 1 goto preflight_failed
 
+rem WPF creates temporary *_wpftmp projects under obj. Always clear obj so an
+rem old/corrupt Win32 resource or generated BAML cannot poison the next build.
+if exist "%OBJ_DIR%" (
+    echo Cleaning generated WPF build state...
+    rmdir /s /q "%OBJ_DIR%" >nul 2>&1
+    if exist "%OBJ_DIR%" (
+        echo [WARN] Could not fully remove %OBJ_DIR%. Close Visual Studio/dotnet processes if build fails.
+    )
+)
+
 echo Building BeaverSearch...
 "%DOTNET_EXE%" build "%PROJECT%" -c Debug --nologo
 set "BUILD_EXIT=%ERRORLEVEL%"
@@ -92,6 +103,7 @@ exit /b 3
 :build_failed
 echo.
 echo [ERROR] BeaverSearch failed to build. Exit code: %BUILD_EXIT%
+echo NOTE: startup.log below is a runtime log and may belong to an older successful/failed launch.
 call :show_log
 pause
 exit /b %BUILD_EXIT%
@@ -100,9 +112,9 @@ exit /b %BUILD_EXIT%
 echo.
 echo Startup log: %LOG_PATH%
 if exist "%LOG_PATH%" (
-    echo ===== LAST STARTUP LOG =====
+    echo ===== LAST RUNTIME LOG (MAY BE FROM A PREVIOUS RUN) =====
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '%LOG_PATH%' -Tail 80"
-    echo ============================
+    echo ========================================================
 ) else (
     echo startup.log does not exist yet.
 )
