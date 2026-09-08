@@ -18,8 +18,7 @@ foreach ($file in $xamlFiles) {
 $notes.Add("XAML XML parsed: $($xamlFiles.Count)/$($xamlFiles.Count)") | Out-Null
 
 # 1b) WPF/XAML compile trap: a dependency property cannot be assigned both
-# as an XML attribute and as an explicit property element on the same object
-# (for example Background="..." plus <Grid.Background>...</Grid.Background>).
+# as an XML attribute and as an explicit property element on the same object.
 $duplicatePropertyAssignments = 0
 foreach ($file in $xamlFiles) {
     try {
@@ -100,6 +99,18 @@ foreach ($xaml in $xamlFiles) {
 }
 $notes.Add("Event handlers checked: $handlerCount") | Out-Null
 
+# 4b) C# compile trap: async methods cannot have ref/out parameters (CS1988).
+$asyncRefCount = 0
+foreach ($file in $csFiles) {
+    $code = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+    $matches = [regex]::Matches($code, '\basync\b[^\{;]{0,700}\([^\)]*\b(?:ref|out)\s+[A-Za-z_][A-Za-z0-9_<>,\.\?\[\]]*\s+[A-Za-z_][A-Za-z0-9_]*', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    foreach ($m in $matches) {
+        $asyncRefCount++
+        Add-Issue "C# async ref/out compile trap (CS1988) in $($file.FullName.Substring($root.Length + 1))."
+    }
+}
+$notes.Add("C# async ref/out signatures: $asyncRefCount") | Out-Null
+
 # 5) Known WPF runtime traps from previous crashes.
 $allowedPanning = @('None','HorizontalOnly','VerticalOnly','Both')
 foreach ($m in [regex]::Matches($allXaml, 'PanningMode\s*=\s*"([^"]+)"')) {
@@ -138,7 +149,7 @@ $editablePatterns = @(
 foreach ($pattern in $editablePatterns) {
     foreach ($m in [regex]::Matches($allXaml, $pattern)) {
         $path = $m.Groups[1].Value
-        if ($path -eq 'IsDropDownOpen') { continue } # template DP, intentionally TwoWay
+        if ($path -eq 'IsDropDownOpen') { continue }
         if ($writablePaths -notcontains $path) { Add-Issue "Potential read-only/default-TwoWay binding: $path" }
     }
 }
@@ -151,7 +162,7 @@ if (-not $firstTab.Success -or $firstTab.Value -notmatch 'MonitorView') { Add-Is
 if (Test-Path '.\src\BeaverSearch\Assets\Icons') { Add-Issue 'Old raster Assets\Icons directory still exists.' }
 if ($allXaml -match '/Assets/Icons/') { Add-Issue 'Old raster navigation icon reference still exists in XAML.' }
 
-# 7) 0.4.1 FixSteamID architecture: yooma.su + CYBERSHOKE rendered-DOM discovery.
+# 7) 0.4.1 FixSteamID architecture: yooma.su + CYBERSHOKE exact identity discovery.
 $vmPath = '.\src\BeaverSearch\ViewModels\MainViewModel.cs'
 $yoomaPath = '.\src\BeaverSearch\Services\YoomaClient.cs'
 $cyberPath = '.\src\BeaverSearch\Services\CybershokeClient.cs'
@@ -170,10 +181,10 @@ foreach ($pair in @(
 if (Test-Path -LiteralPath $yoomaPath -PathType Leaf) {
     $yoomaCode = Get-Content -LiteralPath $yoomaPath -Raw -Encoding UTF8
     if ($yoomaCode -notmatch 'profile/') { Add-Issue 'YoomaClient profile-route parser marker is missing.' }
-    if ($yoomaCode -notmatch 'RenderedDomLoader') { Add-Issue 'YoomaClient rendered-DOM fallback is missing.' }
+    if ($yoomaCode -notmatch 'card/') { Add-Issue 'YoomaClient /card/<SteamID64> parser marker is missing.' }
+    if ($yoomaCode -notmatch 'RenderedDomLoader') { Add-Issue 'YoomaClient rendered-DOM/API fallback is missing.' }
     if ($yoomaCode -notmatch 'SteamAccountAttributeRegex') { Add-Issue 'YoomaClient explicit Steam/account element parser is missing.' }
     if ($yoomaCode -notmatch '/ru/servers/awp/') { Add-Issue 'YoomaClient current mode routes are missing.' }
-    if ($yoomaCode -notmatch 'LegacyPagePaths') { Add-Issue 'YoomaClient legacy route fallback is missing.' }
     if ($yoomaCode -notmatch 'new\(4, 4\)') { Add-Issue 'Yooma page concurrency gate is not 4.' }
 }
 
@@ -181,14 +192,19 @@ if (Test-Path -LiteralPath $cyberPath -PathType Leaf) {
     $cyberCode = Get-Content -LiteralPath $cyberPath -Raw -Encoding UTF8
     if ($cyberCode -notmatch 'cybershoke\.net') { Add-Issue 'CYBERSHOKE base endpoint marker is missing.' }
     if ($cyberCode -notmatch '/ru/cs2/servers/dm') { Add-Issue 'CYBERSHOKE CS2 mode routes are missing.' }
-    if ($cyberCode -notmatch 'RenderedDomLoader') { Add-Issue 'CYBERSHOKE rendered-DOM reader is missing.' }
+    if ($cyberCode -notmatch 'RenderedDomLoader') { Add-Issue 'CYBERSHOKE rendered-DOM/API reader is missing.' }
     if ($cyberCode -notmatch 'SteamAccountAttributeRegex') { Add-Issue 'CYBERSHOKE explicit Steam/account element parser is missing.' }
     if ($cyberCode -notmatch 'RenderBatchSize\s*=\s*8') { Add-Issue 'CYBERSHOKE rolling render batch is not 8.' }
 }
 
 if (Test-Path -LiteralPath $domPath -PathType Leaf) {
     $domCode = Get-Content -LiteralPath $domPath -Raw -Encoding UTF8
-    if ($domCode -notmatch '--dump-dom') { Add-Issue 'Headless browser DOM dump marker is missing.' }
+    if ($domCode -notmatch '--dump-dom') { Add-Issue 'Headless browser dump-dom fallback marker is missing.' }
+    if ($domCode -notmatch '--remote-debugging-port=') { Add-Issue 'Chromium DevTools remote-debugging marker is missing.' }
+    if ($domCode -notmatch 'Network\.responseReceived') { Add-Issue 'CDP Network.responseReceived capture is missing.' }
+    if ($domCode -notmatch 'Network\.getResponseBody') { Add-Issue 'CDP Network.getResponseBody capture is missing.' }
+    if ($domCode -notmatch 'Network\.webSocketFrameReceived') { Add-Issue 'CDP WebSocket frame capture is missing.' }
+    if ($domCode -notmatch 'BrowserGate\.WaitAsync\(TimeSpan\.FromMilliseconds\(180\)') { Add-Issue 'Non-blocking browser probe gate marker is missing.' }
     if ($domCode -notmatch 'Microsoft\\Edge|Microsoft\s+Edge') { Add-Issue 'Microsoft Edge discovery marker is missing.' }
     if ($domCode -notmatch 'Google\\Chrome|Google\s+Chrome') { Add-Issue 'Google Chrome discovery marker is missing.' }
     if ($domCode -notmatch '--user-data-dir=') { Add-Issue 'Disposable browser profile marker is missing.' }
@@ -221,7 +237,7 @@ if ($allXaml -notmatch 'YoomaLivePlayers') { Add-Issue 'Diagnostics yooma live-p
 if ($allXaml -notmatch 'CybershokeLivePlayers') { Add-Issue 'Diagnostics CYBERSHOKE live-player counter is missing.' }
 if ($allXaml -notmatch 'YoomaPagesLoaded') { Add-Issue 'Diagnostics yooma page progress is missing.' }
 if ($allXaml -notmatch 'CybershokePagesLoaded') { Add-Issue 'Diagnostics CYBERSHOKE page progress is missing.' }
-$notes.Add('FixSteamID pipeline: yooma.su + CYBERSHOKE rendered DOM/state -> exact SteamID checked') | Out-Null
+$notes.Add('FixSteamID pipeline: yooma.su + CYBERSHOKE DOM/XHR/WebSocket -> exact SteamID checked') | Out-Null
 
 # 8) Version/DPI/release support markers.
 $csproj = Get-Content '.\src\BeaverSearch\BeaverSearch.csproj' -Raw -Encoding UTF8
@@ -233,6 +249,7 @@ if ($manifest -notmatch 'PerMonitorV2') { Add-Issue 'PerMonitorV2 DPI awareness 
 
 $required = @('README.md','CHANGELOG.md','TEST-CHECKLIST.md','THIRD-PARTY-NOTICES.md','START.bat','DEBUG-START.bat','build-release.ps1','BUILD-RELEASE.bat')
 foreach ($f in $required) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { Add-Issue "Required release file missing: $f" } }
+if (Test-Path '.\.github\workflows') { Add-Issue 'GitHub Actions workflows must not be present in this development repository.' }
 
 $result = New-Object System.Collections.Generic.List[string]
 if ($issues.Count -eq 0) { $result.Add('BeaverSearch v0.4.1 FixSteamID STATIC PREFLIGHT: PASS') | Out-Null }
@@ -242,8 +259,10 @@ $result.Add('Checks:') | Out-Null
 foreach ($n in $notes) { $result.Add("- $n") | Out-Null }
 $result.Add('- Duplicate XAML property assignment / PanningMode / TargetName / Window.RenderTransform: checked') | Out-Null
 $result.Add('- Binding modes: writable inputs + computed ProgressBar OneWay checked') | Out-Null
+$result.Add('- C# async ref/out compile trap (CS1988): checked') | Out-Null
 $result.Add('- MainTabs initial page: MonitorView checked') | Out-Null
-$result.Add('- FixSteamID yooma.su + CYBERSHOKE rendered-DOM pipeline: checked') | Out-Null
+$result.Add('- FixSteamID yooma.su + CYBERSHOKE DOM/API/WebSocket pipeline: checked') | Out-Null
+$result.Add('- GitHub Actions workflows: forbidden/checked') | Out-Null
 $result.Add('- Version / PerMonitorV2 / release files: checked') | Out-Null
 $result.Add('') | Out-Null
 if ($issues.Count -eq 0) {
