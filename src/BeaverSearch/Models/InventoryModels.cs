@@ -19,7 +19,11 @@ public sealed class SteamInventory
     public Dictionary<string, InventoryDescription> Descriptions { get; init; } = new(StringComparer.Ordinal);
 }
 
-public sealed record GameValuation(int AppId, decimal ValueRub, int ItemCount, bool Accessible, int UnpricedItems);
+public sealed record GameValuation(int AppId, decimal ValueRub, int ItemCount, bool Accessible, int UnpricedItems)
+{
+    public int MarketableItems { get; init; }
+    public bool PricingAvailable { get; init; } = true;
+}
 
 public sealed record PlayerValuation(
     GameValuation Cs2,
