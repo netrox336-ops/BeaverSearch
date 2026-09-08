@@ -15,6 +15,7 @@ public sealed class LocalStore
     private readonly object _cacheSaveSync = new();
     private CacheState? _pendingCache;
     private int _cacheSaveRevision;
+    private int _cacheSaveWorkerActive;
     private Task _cacheSaveTask = Task.CompletedTask;
 
     public LocalStore()
@@ -64,8 +65,11 @@ public sealed class LocalStore
         {
             _pendingCache = cache;
             _cacheSaveRevision++;
-            if (_cacheSaveTask.IsCompleted)
+            if (_cacheSaveWorkerActive == 0)
+            {
+                _cacheSaveWorkerActive = 1;
                 _cacheSaveTask = FlushCacheLoopAsync();
+            }
             return _cacheSaveTask;
         }
     }
@@ -82,31 +86,40 @@ public sealed class LocalStore
 
     private async Task FlushCacheLoopAsync()
     {
-        while (true)
+        try
         {
-            // Collapse the burst produced when dozens of newly discovered players
-            // finish almost together into one physical JSON serialization/write.
-            await Task.Delay(550).ConfigureAwait(false);
-
-            CacheState? cache;
-            int revision;
-            lock (_cacheSaveSync)
+            while (true)
             {
-                cache = _pendingCache;
-                revision = _cacheSaveRevision;
-            }
+                // Collapse the burst produced when dozens of newly discovered players
+                // finish almost together into one physical JSON serialization/write.
+                await Task.Delay(550).ConfigureAwait(false);
 
-            if (cache is not null)
-                await WriteAsync(_cachePath, cache).ConfigureAwait(false);
-
-            lock (_cacheSaveSync)
-            {
-                if (revision == _cacheSaveRevision)
+                CacheState? cache;
+                int revision;
+                lock (_cacheSaveSync)
                 {
-                    _pendingCache = null;
-                    return;
+                    cache = _pendingCache;
+                    revision = _cacheSaveRevision;
+                }
+
+                if (cache is not null)
+                    await WriteAsync(_cachePath, cache).ConfigureAwait(false);
+
+                lock (_cacheSaveSync)
+                {
+                    if (revision == _cacheSaveRevision)
+                    {
+                        _pendingCache = null;
+                        _cacheSaveWorkerActive = 0;
+                        return;
+                    }
                 }
             }
+        }
+        catch
+        {
+            lock (_cacheSaveSync) _cacheSaveWorkerActive = 0;
+            throw;
         }
     }
 
