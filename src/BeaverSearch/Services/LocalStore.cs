@@ -5,7 +5,7 @@ namespace BeaverSearch.Services;
 
 public sealed class LocalStore
 {
-    private const int CurrentPriceEngineVersion = 2;
+    private const int CurrentPriceEngineVersion = 3;
     private readonly string _root;
     private readonly string _settingsPath;
     private readonly string _cachePath;
@@ -51,7 +51,7 @@ public sealed class LocalStore
         if (!hasVersionMarker || cache.PriceEngineVersion != CurrentPriceEngineVersion)
         {
             // Preserve exact SteamID/name discoveries, but force valuation to run again.
-            // Old v0.4.1 builds could store a successful 24h check with a false 0 ₽ total.
+            // Old v0.4.1 builds could store a successful 24h check with a false/partial total.
             cache.SteamChecks.Clear();
             cache.PriceEngineVersion = CurrentPriceEngineVersion;
             await WriteAsync(_cachePath, cache).ConfigureAwait(false);
