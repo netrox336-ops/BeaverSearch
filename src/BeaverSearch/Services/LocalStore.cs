@@ -5,6 +5,7 @@ namespace BeaverSearch.Services;
 
 public sealed class LocalStore
 {
+    private const int CurrentPriceEngineVersion = 2;
     private readonly string _root;
     private readonly string _settingsPath;
     private readonly string _cachePath;
@@ -24,17 +25,28 @@ public sealed class LocalStore
     public string DataFolder => _root;
 
     public async Task<AppSettings> LoadSettingsAsync() =>
-        await ReadAsync(_settingsPath, new AppSettings());
+        await ReadAsync(_settingsPath, new AppSettings()).ConfigureAwait(false);
 
     public Task SaveSettingsAsync(AppSettings settings) => WriteAsync(_settingsPath, settings);
 
-    public async Task<CacheState> LoadCacheAsync() =>
-        await ReadAsync(_cachePath, new CacheState());
+    public async Task<CacheState> LoadCacheAsync()
+    {
+        var cache = await ReadAsync(_cachePath, new CacheState()).ConfigureAwait(false);
+        if (cache.PriceEngineVersion != CurrentPriceEngineVersion)
+        {
+            // Preserve exact SteamID/name discoveries, but force valuation to run again.
+            // Old v0.4.1 builds could store a successful 24h check with a false 0 ₽ total.
+            cache.SteamChecks.Clear();
+            cache.PriceEngineVersion = CurrentPriceEngineVersion;
+            await WriteAsync(_cachePath, cache).ConfigureAwait(false);
+        }
+        return cache;
+    }
 
     public Task SaveCacheAsync(CacheState cache) => WriteAsync(_cachePath, cache);
 
     public async Task<List<ServerEntry>> LoadServersAsync() =>
-        await ReadAsync(_serversPath, new List<ServerEntry>());
+        await ReadAsync(_serversPath, new List<ServerEntry>()).ConfigureAwait(false);
 
     public Task SaveServersAsync(IEnumerable<ServerEntry> servers) =>
         WriteAsync(_serversPath, servers.Select(s => new ServerEntry
@@ -49,7 +61,7 @@ public sealed class LocalStore
         {
             if (!File.Exists(path)) return fallback;
             await using var stream = File.OpenRead(path);
-            return await JsonSerializer.DeserializeAsync<T>(stream, _json) ?? fallback;
+            return await JsonSerializer.DeserializeAsync<T>(stream, _json).ConfigureAwait(false) ?? fallback;
         }
         catch
         {
@@ -74,12 +86,12 @@ public sealed class LocalStore
 
     private async Task WriteAsync<T>(string path, T value)
     {
-        await _gate.WaitAsync();
+        await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
             var temp = path + ".tmp";
             await using (var stream = File.Create(temp))
-                await JsonSerializer.SerializeAsync(stream, value, _json);
+                await JsonSerializer.SerializeAsync(stream, value, _json).ConfigureAwait(false);
             File.Move(temp, path, true);
         }
         finally
