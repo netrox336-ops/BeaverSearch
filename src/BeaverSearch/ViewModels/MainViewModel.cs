@@ -207,7 +207,6 @@ public sealed class MainViewModel : ObservableObject
             MessageBox.Show("Можно добавить не более 5 ручных серверов.", "BeaverSearch", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-
         if (!ServerAddressParser.TryNormalize(NewServerAddress, out var address, out var error))
         {
             MessageBox.Show(error + "\n\nМожно вставить даже строку вида: connect 46.174.48.218:28037", "BeaverSearch", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -271,7 +270,6 @@ public sealed class MainViewModel : ObservableObject
     {
         if (e.PropertyName is nameof(ServerEntry.Enabled) or nameof(ServerEntry.Online) or nameof(ServerEntry.Players) or nameof(ServerEntry.MaxPlayers))
             RefreshMetrics();
-
         if (e.PropertyName == nameof(ServerEntry.Enabled) && sender is ServerEntry server &&
             server.Source.Equals("Ручной", StringComparison.OrdinalIgnoreCase))
             _ = _store.SaveServersAsync(Servers.Where(x => x.Source.Equals("Ручной", StringComparison.OrdinalIgnoreCase)));
@@ -286,7 +284,6 @@ public sealed class MainViewModel : ObservableObject
     private void StartMonitoring()
     {
         if (IsMonitoring) return;
-
         ResetLiveDiagnostics(clearServerState: false);
         ClearDynamicServerRows();
         _serverBatchCursor = 0;
@@ -329,7 +326,6 @@ public sealed class MainViewModel : ObservableObject
         _cybershokePagesAttempted = 0;
         _cybershokeLastError = string.Empty;
         LivePlayers.Clear();
-
         if (clearServerState)
         {
             foreach (var server in Servers.Where(x => x.Enabled))
@@ -375,8 +371,6 @@ public sealed class MainViewModel : ObservableObject
 
     private async Task PollCommunitySourcesAsync(CancellationToken ct)
     {
-        // Entire source loaders run on worker threads. Their HTML/JSON parsing can be
-        // large, but it must never execute on the WPF dispatcher.
         var yoomaTask = GetSourceSafeAsync("yooma.su", token => _yooma.GetLiveAsync(token), ct);
         var cybershokeTask = GetSourceSafeAsync("CYBERSHOKE", token => _cybershoke.GetLiveAsync(token), ct);
         await Task.WhenAll(yoomaTask, cybershokeTask);
@@ -397,14 +391,8 @@ public sealed class MainViewModel : ObservableObject
             .ThenBy(x => x.SourceName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(x => x.CanonicalKey, StringComparer.OrdinalIgnoreCase)
             .ToList();
-
         if (useful.Count == 0)
-        {
-            useful = candidates
-                .OrderBy(x => x.SourceName, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.CanonicalKey, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
+            useful = candidates.OrderBy(x => x.SourceName).ThenBy(x => x.CanonicalKey).ToList();
 
         if (useful.Count == 0)
         {
@@ -417,8 +405,7 @@ public sealed class MainViewModel : ObservableObject
         var count = Math.Min(CommunityServerBatchSize, useful.Count);
         if (_serverBatchCursor >= useful.Count) _serverBatchCursor = 0;
         var selected = new List<CommunityServerCandidate>(count);
-        for (var i = 0; i < count; i++)
-            selected.Add(useful[(_serverBatchCursor + i) % useful.Count]);
+        for (var i = 0; i < count; i++) selected.Add(useful[(_serverBatchCursor + i) % useful.Count]);
         _serverBatchCursor = (_serverBatchCursor + count) % useful.Count;
         _serverBatchNumber++;
         _scanBudgetRemaining = MaxScheduledScansPerBatch;
@@ -426,23 +413,28 @@ public sealed class MainViewModel : ObservableObject
         ClearDynamicServerRows();
         LivePlayers.Clear();
 
-        foreach (var sourceGroup in selected.GroupBy(x => x.SourceLabel, StringComparer.OrdinalIgnoreCase))
+        // Apply one selected candidate at a time. This preserves all key/address aliases
+        // for that server and prevents player groups from being attached to a sibling
+        // candidate from the same source batch.
+        foreach (var candidate in selected)
         {
-            var group = sourceGroup.ToList();
-            var original = group[0].Snapshot;
-            var servers = group.SelectMany(x => x.ServerInfos).Distinct().ToList();
-            var players = group
-                .SelectMany(x => x.Players.Take(MaxPlayersPerServerBatch))
-                .GroupBy(x => $"{NormalizeServerKey(EffectivePlayerServerKey(x))}|{x.SteamId64}", StringComparer.OrdinalIgnoreCase)
+            var players = candidate.Players
+                .Where(x => IsSteamId64(x.SteamId64))
+                .GroupBy(x => x.SteamId64, StringComparer.Ordinal)
                 .Select(g => g.First())
+                .Take(MaxPlayersPerServerBatch)
                 .ToList();
-            var slice = original with { Servers = servers, Players = players };
-            await ApplyCommunitySnapshotAsync(slice, group[0].SourceName, group[0].SourceLabel, ct);
+            var slice = candidate.Snapshot with
+            {
+                Servers = candidate.ServerInfos,
+                Players = players
+            };
+            await ApplyCommunitySnapshotAsync(slice, candidate.SourceName, candidate.SourceLabel, ct);
         }
 
-        var playersInBatch = selected.Sum(x => Math.Min(MaxPlayersPerServerBatch, x.Players.Count));
+        var playersInBatch = selected.Sum(x => Math.Min(MaxPlayersPerServerBatch, x.Players.Count(p => IsSteamId64(p.SteamId64))));
         StatusLine = $"Пакет #{_serverBatchNumber}: {selected.Count} серверов / {playersInBatch} игроков — проверка...";
-        Log($"Пакет #{_serverBatchNumber}: {selected.Count} серверов из {useful.Count}, игроков с данными: {playersInBatch}. Ждём завершения проверок перед следующим пакетом.");
+        Log($"Пакет #{_serverBatchNumber}: {selected.Count} серверов из {useful.Count}, точных SteamID в пакете: {playersInBatch}. Ждём завершения проверок перед следующим пакетом.");
         RefreshMetrics(force: true);
 
         await WaitForCurrentBatchScansAsync(ct);
@@ -456,8 +448,6 @@ public sealed class MainViewModel : ObservableObject
     {
         try
         {
-            // Task.Run is intentional: the clients contain substantial synchronous
-            // HTML/regex/JSON parsing after awaits. Keep all of that away from WPF.
             return await Task.Run(() => loader(ct), ct);
         }
         catch (OperationCanceledException) { throw; }
@@ -481,10 +471,7 @@ public sealed class MainViewModel : ObservableObject
             _yoomaProfilePlayers = yooma.Players.Select(x => x.SteamId64).Where(IsSteamId64).Distinct(StringComparer.Ordinal).Count();
             if (yooma.RenderedPages > 0)
                 LogSourceDomThrottled("yooma.su", $"yooma.su: {_yoomaProfilePlayers} SteamID64; render {yooma.RenderedPages}; {yooma.RenderEngine}.");
-            if (yooma.Players.Count == 0)
-                LogSourceWarningThrottled("yooma.su", $"yooma.su: live SteamID пока нет; HTTP {yooma.PagesLoaded}/{yooma.PagesAttempted}, render {yooma.RenderedPages}.");
         }
-
         if (cybershoke is not null)
         {
             _cybershokeLastError = string.Empty;
@@ -494,8 +481,6 @@ public sealed class MainViewModel : ObservableObject
             _cybershokeProfilePlayers = cybershoke.Players.Select(x => x.SteamId64).Where(IsSteamId64).Distinct(StringComparer.Ordinal).Count();
             if (cybershoke.RenderedPages > 0)
                 LogSourceDomThrottled("CYBERSHOKE", $"CYBERSHOKE: {_cybershokeProfilePlayers} SteamID64; render {cybershoke.RenderedPages}; {cybershoke.RenderEngine}.");
-            if (cybershoke.Players.Count == 0)
-                LogSourceWarningThrottled("CYBERSHOKE", $"CYBERSHOKE: live SteamID пока нет; HTTP {cybershoke.PagesLoaded}/{cybershoke.PagesAttempted}, render {cybershoke.RenderedPages}.");
         }
     }
 
@@ -503,22 +488,14 @@ public sealed class MainViewModel : ObservableObject
     {
         var candidates = new List<CommunityServerCandidate>();
         var aliasMap = new Dictionary<string, CommunityServerCandidate>(StringComparer.OrdinalIgnoreCase);
-
         foreach (var info in snapshot.Servers)
         {
             var aliases = new[] { info.Key, info.Address }
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(NormalizeServerKey)
-                .Where(x => x.Length > 0)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+                .Where(x => !string.IsNullOrWhiteSpace(x)).Select(NormalizeServerKey).Where(x => x.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (aliases.Length == 0) continue;
-
             CommunityServerCandidate? candidate = null;
-            foreach (var alias in aliases)
-            {
-                if (aliasMap.TryGetValue(alias, out candidate)) break;
-            }
+            foreach (var alias in aliases) if (aliasMap.TryGetValue(alias, out candidate)) break;
             if (candidate is null)
             {
                 candidate = new CommunityServerCandidate(sourceName, sourceLabel, snapshot, aliases[0]);
@@ -526,41 +503,24 @@ public sealed class MainViewModel : ObservableObject
             }
             candidate.ServerInfos.Add(info);
             candidate.ReportedPlayers = Math.Max(candidate.ReportedPlayers, Math.Max(0, info.Players));
-            foreach (var alias in aliases)
-            {
-                candidate.Aliases.Add(alias);
-                aliasMap[alias] = candidate;
-            }
+            foreach (var alias in aliases) { candidate.Aliases.Add(alias); aliasMap[alias] = candidate; }
         }
-
         foreach (var player in snapshot.Players)
         {
             var aliases = new[] { player.ServerKey, player.ServerAddress }
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(NormalizeServerKey)
-                .Where(x => x.Length > 0)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+                .Where(x => !string.IsNullOrWhiteSpace(x)).Select(NormalizeServerKey).Where(x => x.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (aliases.Length == 0) continue;
-
             CommunityServerCandidate? candidate = null;
-            foreach (var alias in aliases)
-            {
-                if (aliasMap.TryGetValue(alias, out candidate)) break;
-            }
+            foreach (var alias in aliases) if (aliasMap.TryGetValue(alias, out candidate)) break;
             if (candidate is null)
             {
                 candidate = new CommunityServerCandidate(sourceName, sourceLabel, snapshot, aliases[0]);
                 candidates.Add(candidate);
             }
             candidate.Players.Add(player);
-            foreach (var alias in aliases)
-            {
-                candidate.Aliases.Add(alias);
-                aliasMap[alias] = candidate;
-            }
+            foreach (var alias in aliases) { candidate.Aliases.Add(alias); aliasMap[alias] = candidate; }
         }
-
         return candidates;
     }
 
@@ -573,11 +533,7 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private async Task ApplyCommunitySnapshotAsync(
-        YoomaLiveSnapshot snapshot,
-        string sourceName,
-        string sourceLabel,
-        CancellationToken ct)
+    private async Task ApplyCommunitySnapshotAsync(YoomaLiveSnapshot snapshot, string sourceName, string sourceLabel, CancellationToken ct)
     {
         var serverMap = new Dictionary<string, ServerEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var info in snapshot.Servers)
@@ -603,13 +559,16 @@ public sealed class MainViewModel : ObservableObject
             server.Source = sourceLabel;
             serverMap[NormalizeServerKey(info.Key)] = server;
             serverMap[NormalizeServerKey(key)] = server;
+            if (!string.IsNullOrWhiteSpace(info.Address)) serverMap[NormalizeServerKey(info.Address)] = server;
         }
 
         foreach (var group in snapshot.Players.GroupBy(x => NormalizeServerKey(EffectivePlayerServerKey(x)), StringComparer.OrdinalIgnoreCase))
         {
             var first = group.First();
-            if (!serverMap.TryGetValue(NormalizeServerKey(first.ServerKey), out var server) &&
-                !serverMap.TryGetValue(NormalizeServerKey(EffectivePlayerServerKey(first)), out server))
+            ServerEntry? server = null;
+            serverMap.TryGetValue(NormalizeServerKey(first.ServerKey), out server);
+            if (server is null) serverMap.TryGetValue(NormalizeServerKey(EffectivePlayerServerKey(first)), out server);
+            if (server is null)
             {
                 var address = EffectivePlayerServerKey(first);
                 server = Servers.FirstOrDefault(x => x.Address.Equals(address, StringComparison.OrdinalIgnoreCase));
@@ -629,7 +588,6 @@ public sealed class MainViewModel : ObservableObject
                     AttachServer(server);
                     Servers.Add(server);
                 }
-                serverMap[NormalizeServerKey(address)] = server;
             }
 
             var roster = group
@@ -639,7 +597,6 @@ public sealed class MainViewModel : ObservableObject
                 .Take(MaxPlayersPerServerBatch)
                 .Select(x => new MonitoringPlayer(string.IsNullOrWhiteSpace(x.Nickname) ? x.SteamId64 : x.Nickname, x.SteamId64))
                 .ToList();
-
             server.Online = true;
             server.Players = Math.Max(server.Players, roster.Count);
             server.LastCheckUtc = snapshot.LoadedUtc;
@@ -648,8 +605,6 @@ public sealed class MainViewModel : ObservableObject
             await ProcessRosterAsync(server, roster, ct);
         }
 
-        // Defensive cap: even if one source aliases the same server in several forms,
-        // the WPF DataGrid never receives an unbounded community catalog.
         var dynamicRows = Servers.Where(x => !x.Source.Equals("Ручной", StringComparison.OrdinalIgnoreCase)).ToList();
         foreach (var extra in dynamicRows.Skip(CommunityServerBatchSize))
         {
@@ -663,7 +618,6 @@ public sealed class MainViewModel : ObservableObject
         var nowNames = new HashSet<string>(roster.Select(x => Normalize(x.Name)), StringComparer.OrdinalIgnoreCase);
         _presentNames.TryGetValue(server.Address, out var previous);
         previous ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         var cacheChanged = false;
         foreach (var p in roster)
         {
@@ -672,13 +626,10 @@ public sealed class MainViewModel : ObservableObject
             var normalized = Normalize(p.Name);
             var nameKey = $"{server.Address}|{normalized}";
             UpsertLivePlayer(server.Address, p.Name);
-
             string? knownSteamId = IsSteamId64(p.SteamId64 ?? string.Empty) ? p.SteamId64 : null;
             if (knownSteamId is null && _cache.NameResolves.TryGetValue(nameKey, out var cachedName) &&
-                IsSteamId64(cachedName.SteamId64 ?? string.Empty) &&
-                DateTime.UtcNow - cachedName.LastAttemptUtc < SteamCheckTtl)
+                IsSteamId64(cachedName.SteamId64 ?? string.Empty) && DateTime.UtcNow - cachedName.LastAttemptUtc < SteamCheckTtl)
                 knownSteamId = cachedName.SteamId64;
-
             if (knownSteamId is not null)
             {
                 if (string.Equals(knownSteamId, p.SteamId64, StringComparison.Ordinal))
@@ -691,7 +642,6 @@ public sealed class MainViewModel : ObservableObject
                 _unresolvedLogTimes.TryRemove(nameKey, out _);
                 AddConfirmedForServer(server.Address, knownSteamId);
             }
-
             var shouldScan = !previous.Contains(normalized);
             if (!shouldScan)
             {
@@ -700,25 +650,19 @@ public sealed class MainViewModel : ObservableObject
                 else if (!_cache.NameResolves.TryGetValue(nameKey, out var resolveCache) || DateTime.UtcNow - resolveCache.LastAttemptUtc >= UnresolvedRetryDelay)
                     shouldScan = true;
             }
-
             if (shouldScan && _scanBudgetRemaining > 0)
             {
                 _scanBudgetRemaining--;
                 ScheduleScan(server, p.Name, knownSteamId, ct);
             }
-            else if (shouldScan)
-            {
-                SetLiveStatus(server.Address, p.Name, "Отложен до следующего пакета");
-            }
+            else if (shouldScan) SetLiveStatus(server.Address, p.Name, "Отложен до следующего пакета");
         }
-
         foreach (var left in previous.Where(x => !nowNames.Contains(x)))
         {
             var key = $"{server.Address}|{left}";
             _unresolvedKeys.TryRemove(key, out _);
             _unresolvedLogTimes.TryRemove(key, out _);
         }
-
         if (cacheChanged) await _store.SaveCacheAsync(_cache);
         _presentNames[server.Address] = nowNames;
     }
@@ -735,14 +679,8 @@ public sealed class MainViewModel : ObservableObject
     {
         var tasks = _playerTasks.Values.ToArray();
         if (tasks.Length == 0) return;
-        try
-        {
-            await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(90), ct);
-        }
-        catch (TimeoutException)
-        {
-            Log("Пакет: часть inventory-проверок превысила 90с. Следующий пакет продолжит работу, зависшие SteamID остаются под per-ID gate.");
-        }
+        try { await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(90), ct); }
+        catch (TimeoutException) { Log("Пакет: часть inventory-проверок превысила 90с; следующий пакет продолжит работу."); }
     }
 
     private async Task ScanSafeAsync(ServerEntry server, string nickname, string? knownSteamId, CancellationToken monitorCt)
@@ -753,7 +691,7 @@ public sealed class MainViewModel : ObservableObject
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            SetLiveStatus(server.Address, nickname, "Ошибка оценки");
+            Ui(() => SetLiveStatusCore(server.Address, nickname, "Ошибка оценки"));
             Log($"{nickname}: scan error — {ex.Message}");
         }
         finally
@@ -767,7 +705,6 @@ public sealed class MainViewModel : ObservableObject
     {
         var nameKey = $"{server.Address}|{Normalize(nickname)}";
         string? steamId = IsSteamId64(knownSteamId ?? string.Empty) ? knownSteamId : null;
-
         if (steamId is null && _cache.NameResolves.TryGetValue(nameKey, out var nameCache))
         {
             var age = DateTime.UtcNow - nameCache.LastAttemptUtc;
@@ -778,21 +715,18 @@ public sealed class MainViewModel : ObservableObject
                 return;
             }
         }
-
         if (steamId is null)
         {
             SetLiveStatus(server.Address, nickname, "Поиск SteamID...");
             _cache.NameResolves[nameKey] = new NameResolveCache { SteamId64 = null, LastAttemptUtc = DateTime.UtcNow };
             await _store.SaveCacheAsync(_cache);
         }
-
         ct.ThrowIfCancellationRequested();
         if (!IsSteamId64(steamId ?? string.Empty))
         {
             MarkUnresolved(server.Address, nickname, nameKey, log: true);
             return;
         }
-
         _unresolvedKeys.TryRemove(nameKey, out _);
         _unresolvedLogTimes.TryRemove(nameKey, out _);
         SetLiveSteam(server.Address, nickname, steamId!);
@@ -804,7 +738,7 @@ public sealed class MainViewModel : ObservableObject
         {
             if (_cache.SteamChecks.TryGetValue(steamId!, out var checkedCache) && DateTime.UtcNow - checkedCache.LastCheckedUtc < SteamCheckTtl)
             {
-                AttachServerToExistingResult(steamId!, server.Address);
+                Ui(() => AttachServerToExistingResultCore(steamId!, server.Address));
                 SetLiveStatus(server.Address, nickname, "Уже проверен <24ч");
                 return;
             }
@@ -823,8 +757,7 @@ public sealed class MainViewModel : ObservableObject
 
                 _cache.SteamChecks[steamId!] = new SteamCheckCache { LastCheckedUtc = DateTime.UtcNow };
                 await _store.SaveCacheAsync(_cache);
-                _checkedSession++;
-
+                Interlocked.Increment(ref _checkedSession);
                 var matched = MatchGames(valuation);
                 var inaccessible = new List<string>();
                 if (!valuation.Cs2.Accessible) inaccessible.Add("CS2");
@@ -834,22 +767,18 @@ public sealed class MainViewModel : ObservableObject
 
                 if (matched.Count > 0)
                 {
-                    UpsertResult(new PlayerResult
+                    var incoming = new PlayerResult
                     {
-                        SteamId64 = steamId!,
-                        Nickname = profile.Nickname,
-                        SteamUrl = profile.ProfileUrl,
-                        AvatarUrl = profile.AvatarUrl,
-                        Cs2Rub = valuation.Cs2.ValueRub,
-                        DotaRub = valuation.Dota2.ValueRub,
-                        RustRub = valuation.Rust.ValueRub,
-                        MatchedBy = string.Join(", ", matched),
-                        Servers = server.Address,
-                        FirstSeenUtc = DateTime.UtcNow,
-                        LastCheckedUtc = DateTime.UtcNow,
-                        Status = status
+                        SteamId64 = steamId!, Nickname = profile.Nickname, SteamUrl = profile.ProfileUrl, AvatarUrl = profile.AvatarUrl,
+                        Cs2Rub = valuation.Cs2.ValueRub, DotaRub = valuation.Dota2.ValueRub, RustRub = valuation.Rust.ValueRub,
+                        MatchedBy = string.Join(", ", matched), Servers = server.Address, FirstSeenUtc = DateTime.UtcNow,
+                        LastCheckedUtc = DateTime.UtcNow, Status = status
+                    };
+                    Ui(() =>
+                    {
+                        UpsertResultCore(incoming);
+                        SetLiveStatusCore(server.Address, nickname, "MATCH ✓");
                     });
-                    SetLiveStatus(server.Address, nickname, "MATCH ✓");
                     Log($"MATCH: {profile.Nickname} ({steamId}) — {valuation.Total:N0} ₽ [{string.Join(", ", matched)}]");
                 }
                 else
@@ -883,12 +812,11 @@ public sealed class MainViewModel : ObservableObject
             existing.Contains(steamId, StringComparer.Ordinal) ? existing : existing.Append(steamId).ToArray());
     }
 
-    private void AttachServerToExistingResult(string steamId, string serverAddress)
+    private void AttachServerToExistingResultCore(string steamId, string serverAddress)
     {
         var existing = Results.FirstOrDefault(x => x.SteamId64 == steamId);
         if (existing is null) return;
-        var servers = existing.Servers.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var servers = existing.Servers.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (servers.Add(serverAddress)) existing.Servers = string.Join("; ", servers);
     }
 
@@ -904,7 +832,7 @@ public sealed class MainViewModel : ObservableObject
     private static bool InRange(decimal value, decimal min, decimal max) =>
         value >= Math.Min(min, max) && value <= Math.Max(min, max);
 
-    private void UpsertResult(PlayerResult incoming)
+    private void UpsertResultCore(PlayerResult incoming)
     {
         var existing = Results.FirstOrDefault(x => x.SteamId64 == incoming.SteamId64);
         if (existing is null)
@@ -914,9 +842,7 @@ public sealed class MainViewModel : ObservableObject
             RefreshMetrics(force: true);
             return;
         }
-
-        var servers = existing.Servers.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var servers = existing.Servers.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
         servers.Add(incoming.Servers);
         existing.Servers = string.Join("; ", servers);
         existing.Nickname = incoming.Nickname;
@@ -931,30 +857,28 @@ public sealed class MainViewModel : ObservableObject
         RefreshMetrics(force: true);
     }
 
-    private void UpsertLivePlayer(string server, string nickname)
+    private void UpsertLivePlayer(string server, string nickname) => Ui(() =>
     {
         var key = $"{server}|{Normalize(nickname)}";
         var existing = LivePlayers.FirstOrDefault(x => x.Key == key);
-        if (existing is not null)
-        {
-            existing.LastSeenUtc = DateTime.UtcNow;
-            return;
-        }
+        if (existing is not null) { existing.LastSeenUtc = DateTime.UtcNow; return; }
         LivePlayers.Insert(0, new LivePlayerRow { Key = key, Server = server, Nickname = nickname, LastSeenUtc = DateTime.UtcNow });
         while (LivePlayers.Count > 160) LivePlayers.RemoveAt(LivePlayers.Count - 1);
-    }
+    });
 
-    private void SetLiveStatus(string server, string nickname, string status)
+    private void SetLiveStatus(string server, string nickname, string status) => Ui(() => SetLiveStatusCore(server, nickname, status));
+
+    private void SetLiveStatusCore(string server, string nickname, string status)
     {
         var row = LivePlayers.FirstOrDefault(x => x.Key == $"{server}|{Normalize(nickname)}");
         if (row is not null) row.Status = status;
     }
 
-    private void SetLiveSteam(string server, string nickname, string steamId)
+    private void SetLiveSteam(string server, string nickname, string steamId) => Ui(() =>
     {
         var row = LivePlayers.FirstOrDefault(x => x.Key == $"{server}|{Normalize(nickname)}");
         if (row is not null) row.SteamId64 = steamId;
-    }
+    });
 
     private async Task ManualCheckAsync()
     {
@@ -964,7 +888,6 @@ public sealed class MainViewModel : ObservableObject
             ManualResultText = "Некорректный SteamID64. Ожидается 17 цифр, обычно начиная с 7656.";
             return;
         }
-
         ManualResultText = "Проверка...";
         try
         {
@@ -974,18 +897,9 @@ public sealed class MainViewModel : ObservableObject
             var p = await profileTask;
             var v = await valueTask;
             var match = MatchGames(v);
-            ManualResultText =
-                $"{p.Nickname}\n" +
-                $"CS2: {v.Cs2.ValueRub:N0} ₽ ({InventoryState(v.Cs2)})\n" +
-                $"Dota 2: {v.Dota2.ValueRub:N0} ₽ ({InventoryState(v.Dota2)})\n" +
-                $"Rust: {v.Rust.ValueRub:N0} ₽ ({InventoryState(v.Rust)})\n" +
-                $"Итого: {v.Total:N0} ₽\n" +
-                $"Фильтр: {(match.Count > 0 ? string.Join(", ", match) : "не подходит")}";
+            ManualResultText = $"{p.Nickname}\nCS2: {v.Cs2.ValueRub:N0} ₽ ({InventoryState(v.Cs2)})\nDota 2: {v.Dota2.ValueRub:N0} ₽ ({InventoryState(v.Dota2)})\nRust: {v.Rust.ValueRub:N0} ₽ ({InventoryState(v.Rust)})\nИтого: {v.Total:N0} ₽\nФильтр: {(match.Count > 0 ? string.Join(", ", match) : "не подходит")}";
         }
-        catch (Exception ex)
-        {
-            ManualResultText = "Ошибка проверки: " + ex.Message;
-        }
+        catch (Exception ex) { ManualResultText = "Ошибка проверки: " + ex.Message; }
     }
 
     private static string InventoryState(GameValuation value)
@@ -1018,13 +932,7 @@ public sealed class MainViewModel : ObservableObject
             MessageBox.Show("Список результатов пуст.", "BeaverSearch", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        var dialog = new SaveFileDialog
-        {
-            Filter = "Excel Workbook (*.xlsx)|*.xlsx",
-            FileName = $"BeaverSearch_{DateTime.Now:yyyy-MM-dd_HH-mm}.xlsx",
-            AddExtension = true,
-            DefaultExt = ".xlsx"
-        };
+        var dialog = new SaveFileDialog { Filter = "Excel Workbook (*.xlsx)|*.xlsx", FileName = $"BeaverSearch_{DateTime.Now:yyyy-MM-dd_HH-mm}.xlsx", AddExtension = true, DefaultExt = ".xlsx" };
         if (dialog.ShowDialog() != true) return;
         try
         {
@@ -1032,40 +940,21 @@ public sealed class MainViewModel : ObservableObject
             StatusLine = "Excel экспортирован";
             Log("Экспорт: " + dialog.FileName);
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show("Не удалось создать Excel:\n" + ex.Message, "BeaverSearch", MessageBoxButton.OK, MessageBoxImage.Error);
-        }
+        catch (Exception ex) { MessageBox.Show("Не удалось создать Excel:\n" + ex.Message, "BeaverSearch", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
-    private void ClearResults()
-    {
-        Results.Clear();
-        SelectedResult = null;
-        RefreshMetrics(force: true);
-    }
-
-    private void OpenDataFolder() =>
-        Process.Start(new ProcessStartInfo("explorer.exe", _store.DataFolder) { UseShellExecute = true });
-
+    private void ClearResults() { Results.Clear(); SelectedResult = null; RefreshMetrics(force: true); }
+    private void OpenDataFolder() => Process.Start(new ProcessStartInfo("explorer.exe", _store.DataFolder) { UseShellExecute = true });
     private void OpenSelectedSteam()
     {
         if (SelectedResult is null || string.IsNullOrWhiteSpace(SelectedResult.SteamUrl)) return;
         Process.Start(new ProcessStartInfo(SelectedResult.SteamUrl) { UseShellExecute = true });
     }
-
     private void CopySelectedSteam()
     {
         if (SelectedResult is null || string.IsNullOrWhiteSpace(SelectedResult.SteamId64)) return;
-        try
-        {
-            Clipboard.SetText(SelectedResult.SteamId64);
-            StatusLine = "SteamID64 скопирован";
-        }
-        catch (Exception ex)
-        {
-            Log("Не удалось скопировать SteamID64: " + ex.Message);
-        }
+        try { Clipboard.SetText(SelectedResult.SteamId64); StatusLine = "SteamID64 скопирован"; }
+        catch (Exception ex) { Log("Не удалось скопировать SteamID64: " + ex.Message); }
     }
 
     private void RefreshMetrics(bool force = false)
@@ -1076,7 +965,6 @@ public sealed class MainViewModel : ObservableObject
             dispatcher.BeginInvoke(() => RefreshMetrics(force), DispatcherPriority.Background);
             return;
         }
-
         var now = Environment.TickCount64;
         if (!force && now - _lastMetricsRefreshTick < 140)
         {
@@ -1091,7 +979,6 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
         _lastMetricsRefreshTick = now;
-
         OnPropertyChanged(nameof(ServersOnline)); OnPropertyChanged(nameof(PlayersOnline)); OnPropertyChanged(nameof(CheckedSession));
         OnPropertyChanged(nameof(UnresolvedSession)); OnPropertyChanged(nameof(MatchCount)); OnPropertyChanged(nameof(ServerCountText));
         OnPropertyChanged(nameof(UniquePlayers)); OnPropertyChanged(nameof(AverageResultValue)); OnPropertyChanged(nameof(HighestResultValue));
@@ -1113,7 +1000,6 @@ public sealed class MainViewModel : ObservableObject
         _unresolvedLogTimes[nameKey] = now;
         Log($"Unresolved: {nickname} @ {serverAddress}. Повтор resolver через ~45с.");
     }
-
     private void LogSourceWarningThrottled(string source, string message)
     {
         var now = DateTime.UtcNow;
@@ -1121,7 +1007,6 @@ public sealed class MainViewModel : ObservableObject
         _sourceWarningTimes[source] = now;
         Log(message);
     }
-
     private void LogSourceDomThrottled(string source, string message)
     {
         var now = DateTime.UtcNow;
@@ -1129,41 +1014,31 @@ public sealed class MainViewModel : ObservableObject
         _sourceDomLogTimes[source] = now;
         Log(message);
     }
-
-    private void Log(string message)
+    private void Log(string message) => Ui(() =>
     {
-        var dispatcher = Application.Current?.Dispatcher;
-        if (dispatcher is not null && !dispatcher.CheckAccess())
-        {
-            dispatcher.BeginInvoke(() => Log(message), DispatcherPriority.Background);
-            return;
-        }
         Logs.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");
         while (Logs.Count > 300) Logs.RemoveAt(Logs.Count - 1);
+    });
+
+    private static void Ui(Action action)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess()) { action(); return; }
+        dispatcher.BeginInvoke(action, DispatcherPriority.Background);
     }
 
     private static string EffectivePlayerServerKey(YoomaPlayer player) =>
         string.IsNullOrWhiteSpace(player.ServerAddress) ? player.ServerKey : player.ServerAddress;
-
-    private static string NormalizeServerKey(string value) =>
-        (value ?? string.Empty).Trim().ToLowerInvariant();
-
-    private static bool IsSteamId64(string s) =>
-        s.Length == 17 && s.All(char.IsDigit) && s.StartsWith("7656", StringComparison.Ordinal);
-
-    private static string Normalize(string s) =>
-        string.Join(' ', s.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    private static string NormalizeServerKey(string value) => (value ?? string.Empty).Trim().ToLowerInvariant();
+    private static bool IsSteamId64(string s) => s.Length == 17 && s.All(char.IsDigit) && s.StartsWith("7656", StringComparison.Ordinal);
+    private static string Normalize(string s) => string.Join(' ', s.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
 
     private sealed class CommunityServerCandidate
     {
         public CommunityServerCandidate(string sourceName, string sourceLabel, YoomaLiveSnapshot snapshot, string canonicalKey)
         {
-            SourceName = sourceName;
-            SourceLabel = sourceLabel;
-            Snapshot = snapshot;
-            CanonicalKey = canonicalKey;
+            SourceName = sourceName; SourceLabel = sourceLabel; Snapshot = snapshot; CanonicalKey = canonicalKey;
         }
-
         public string SourceName { get; }
         public string SourceLabel { get; }
         public YoomaLiveSnapshot Snapshot { get; }
