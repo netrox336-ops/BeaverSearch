@@ -24,8 +24,8 @@ public sealed class InventoryValuationService
     public async Task<PlayerValuation> ValuePlayerAsync(string steamId64, string csFloatApiKey, CancellationToken ct)
     {
         // MainViewModel may queue many players at once. Only four heavy valuation
-        // pipelines are allowed to run simultaneously so browser/network/JSON work
-        // cannot saturate the machine and freeze the WPF dispatcher.
+        // pipelines are allowed to run simultaneously so network/JSON work cannot
+        // saturate the machine and freeze the WPF dispatcher.
         await _playerValuationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -39,15 +39,12 @@ public sealed class InventoryValuationService
                 await dota.ConfigureAwait(false),
                 await rust.ConfigureAwait(false));
 
-            // Do not poison the 24h player cache with a fake 0 ₽ result when Steam
-            // Market temporarily returned no usable prices. ProcessPlayerAsync writes
-            // SteamChecks only after this method succeeds, so throwing here forces a
-            // later retry instead of hiding the player for 24 hours.
-            var nonEmpty = new[] { result.Cs2, result.Dota2, result.Rust }
-                .Where(x => x.Accessible && x.ItemCount > 0)
-                .ToArray();
-            if (nonEmpty.Length > 0 && nonEmpty.All(x => x.ValueRub <= 0 && x.UnpricedItems >= x.ItemCount))
-                throw new HttpRequestException("Steam Market не вернул ни одной цены для непустого публичного инвентаря; оценка не кэшируется.");
+            // A private/empty/non-marketable inventory may legitimately be 0 ₽.
+            // A public inventory with Steam-marketable items but zero provider answers
+            // is different: never cache that as a successful 0 ₽ valuation for 24h.
+            var games = new[] { result.Cs2, result.Dota2, result.Rust };
+            if (games.Any(x => x.Accessible && x.MarketableItems > 0 && !x.PricingAvailable))
+                throw new HttpRequestException("Steam Market не вернул цены для marketable-предметов; оценка не кэшируется и будет повторена.");
 
             return result;
         }
@@ -63,17 +60,22 @@ public sealed class InventoryValuationService
         if (!inventory.Accessible) return new GameValuation(appId, 0, 0, false, 0);
 
         var itemCount = 0;
+        var marketableItems = 0;
         var marketNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var asset in inventory.Assets)
         {
-            itemCount += (int)Math.Min(asset.Amount, int.MaxValue);
+            var amount = (int)Math.Min(asset.Amount, int.MaxValue);
+            itemCount += amount;
             if (!inventory.Descriptions.TryGetValue($"{asset.ClassId}:{asset.InstanceId}", out var desc)) continue;
-            if (!string.IsNullOrWhiteSpace(desc.MarketHashName)) marketNames.Add(desc.MarketHashName.Trim());
+            if (!desc.Marketable || string.IsNullOrWhiteSpace(desc.MarketHashName)) continue;
+            marketableItems += amount;
+            marketNames.Add(desc.MarketHashName.Trim());
         }
 
-        // Steam Community Market lookup happens only for names that occur in this
-        // inventory. The provider deduplicates/cache-shares requests across all players.
+        // Steam Community Market lookup happens only for marketable names that occur
+        // in this inventory. The provider deduplicates/cache-shares across all players.
         var prices = await _prices.GetPricesAsync(appId, marketNames, ct).ConfigureAwait(false);
+        var pricingAvailable = marketNames.Count == 0 || prices.Count > 0;
         var lines = new List<(InventoryAsset Asset, InventoryDescription? Desc, decimal UnitPrice)>(inventory.Assets.Count);
         var unpriced = 0;
 
@@ -81,7 +83,7 @@ public sealed class InventoryValuationService
         {
             inventory.Descriptions.TryGetValue($"{asset.ClassId}:{asset.InstanceId}", out var desc);
             decimal price = 0;
-            if (desc is not null && !string.IsNullOrWhiteSpace(desc.MarketHashName))
+            if (desc is not null && desc.Marketable && !string.IsNullOrWhiteSpace(desc.MarketHashName))
                 prices.TryGetValue(desc.MarketHashName.Trim(), out price);
             if (price <= 0) unpriced += (int)Math.Min(asset.Amount, int.MaxValue);
             lines.Add((asset, desc, price));
@@ -113,6 +115,10 @@ public sealed class InventoryValuationService
         }
 
         var total = lines.Sum(x => x.UnitPrice * x.Asset.Amount);
-        return new GameValuation(appId, decimal.Round(total, 2), itemCount, true, unpriced);
+        return new GameValuation(appId, decimal.Round(total, 2), itemCount, true, unpriced)
+        {
+            MarketableItems = marketableItems,
+            PricingAvailable = pricingAvailable
+        };
     }
 }
