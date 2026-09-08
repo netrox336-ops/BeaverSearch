@@ -1,24 +1,20 @@
-BeaverSearch v0.4.1 FixSteamID STATIC PREFLIGHT: PASS
+BeaverSearch v0.4.1 FixSteamID STATIC PREFLIGHT: RE-RUN REQUIRED
 
-Checks:
-- XAML XML parsed: 8/8
-- Duplicate attribute/property-element assignments: 0
-- StaticResource refs: 394, project keys: 67, missing: 0
-- Referenced packaged assets: 18, missing: 0
-- Event handlers checked: 19, missing: 0
-- PanningMode / TargetName / Window.RenderTransform: checked
-- Binding modes: writable inputs + computed ProgressBar OneWay checked
-- MainTabs initial page: MonitorView checked
-- FixSteamID pipeline: yooma.su + CYBERSHOKE rendered DOM/state -> exact Steam identity checked
-- Rendered DOM fallback: Microsoft Edge / Google Chrome headless with disposable profile checked
-- Steam identity normalization: SteamID64 / AccountID / Steam2 / Steam3 markers checked
-- Legacy A2sClient / GameMonitoringResolver runtime files: absent
-- Yooma current routes + numbered fallback: checked
-- CYBERSHOKE rolling mode-page batch: 8
-- Inventory scan gate: 8; Steam scan TTL: 24h
-- Version 0.4.1 / assembly 0.4.1.0 / PerMonitorV2 / release files: checked
-- C# lexical delimiter scan: 38 files, issues: 0
+Этот файл был инвалидирован изменениями FixSteamID r4 от 2026-09-08.
+Актуальный STATIC-PREFLIGHT.ps1 уже обновлён и будет автоматически запущен START.bat на Windows перед dotnet build.
 
-No static preflight issues detected.
+Новые проверки r4:
+- C# async ref/out compile trap (CS1988)
+- yooma `/card/<SteamID64>` marker
+- Chromium DevTools `--remote-debugging-port`
+- CDP `Network.responseReceived`
+- CDP `Network.getResponseBody`
+- CDP `Network.webSocketFrameReceived`
+- non-blocking browser probe gate
+- disposable browser profile
+- отсутствие `.github/workflows`
+- существующие XAML/XML/StaticResource/event/binding/DPI checks сохранены
 
-NOTE: STATIC-PREFLIGHT does not replace the native Windows WPF compiler/runtime test. START.bat performs that build before launch.
+Причина re-run: после последнего записанного PASS изменён RenderedDomLoader и усилен resolver DOM/XHR/WebSocket. Нельзя переносить старый PASS на новый исходный код без повторного запуска проверки.
+
+Запустите START.bat: STATIC-PREFLIGHT.txt будет перезаписан фактическим PASS/FAIL до dotnet build.
