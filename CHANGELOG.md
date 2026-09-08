@@ -6,7 +6,7 @@
 
 - Исправлен `CSC CS7065: Unable to read beyond the end of the stream` при WPF build.
 - Причина: `Assets/Brand/BeaverSearch.ico` был физически обрезан. ICO-directory содержал четвёртый frame с offset `6319`, при этом длина самого файла также была `6319` байт, поэтому Win32 resource compiler пытался читать за концом stream.
-- Повреждённый ICO заменён на валидный multi-size icon.
+- Первая попытка замены тоже оказалась некорректной и была поймана новым preflight (`frame 3 exceeds file size`). Она заменена на проверенный single-frame 32×32 ICO: header `0/1/1`, payload size `388`, offset `22`, полный файл `410` байт; `offset + size == file length`.
 - `STATIC-PREFLIGHT.ps1` теперь валидирует ICO header, directory table и границы каждого frame, чтобы аналогичный дефект больше не проходил как `PASS`.
 - `START.bat` очищает `src/BeaverSearch/obj` перед `dotnet build`, чтобы старые WPF `*_wpftmp`/BAML/Win32-resource артефакты не влияли на новый build.
 - При build error launcher помечает `startup.log` как runtime-log, который может относиться к предыдущему запуску, чтобы старые XAML ошибки не выглядели текущими.
