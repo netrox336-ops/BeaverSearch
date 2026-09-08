@@ -1,0 +1,45 @@
+<Window x:Class="BeaverSearch.SplashWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="BeaverSearch" Width="760" Height="470"
+        WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="NoResize"
+        ShowInTaskbar="False" Topmost="True" Background="#0D0E10" AllowsTransparency="False">
+    <Grid x:Name="SplashRoot" Opacity="0">
+        <Grid.Background>
+            <RadialGradientBrush Center="0.5,0.42" GradientOrigin="0.5,0.42" RadiusX="0.78" RadiusY="0.78">
+                <GradientStop Color="#2A1D13" Offset="0"/>
+                <GradientStop Color="#121417" Offset="0.48"/>
+                <GradientStop Color="#0D0E10" Offset="1"/>
+            </RadialGradientBrush>
+        </Grid.Background>
+        <Grid x:Name="BrandGroup" Width="520" VerticalAlignment="Center" HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+            <Grid.RenderTransform>
+                <ScaleTransform ScaleX="0.92" ScaleY="0.92"/>
+            </Grid.RenderTransform>
+            <StackPanel HorizontalAlignment="Center">
+                <Border Width="146" Height="146" CornerRadius="73" Background="#161A1E" BorderBrush="#49321F" BorderThickness="1" HorizontalAlignment="Center">
+                    <Image Source="/Assets/Brand/beaver_logo.png" Width="132" Height="132" Stretch="Uniform"/>
+                </Border>
+                <TextBlock HorizontalAlignment="Center" Margin="0,18,0,0" FontSize="42" FontWeight="Bold" FontFamily="Inter, Segoe UI Variable Display, Segoe UI">
+                    <Run Text="Beaver" Foreground="#F2B568"/><Run Text="Search" Foreground="#E8EDF2"/>
+                </TextBlock>
+                <TextBlock Text="ИГРОКИ ИМЕЮТ ЦЕННОСТЬ" HorizontalAlignment="Center" Margin="0,5,0,0" Foreground="#7E8791" FontSize="11" FontWeight="SemiBold"/>
+                <TextBlock x:Name="StageText" Text="Запуск интерфейса..." HorizontalAlignment="Center" Margin="0,38,0,0" Foreground="#B7BEC6" FontSize="12"/>
+                <Grid Width="420" Height="7" Margin="0,14,0,0">
+                    <Border Background="#252B31" CornerRadius="4"/>
+                    <Border x:Name="ProgressFill" Background="#E59D4D" CornerRadius="4" HorizontalAlignment="Left" Width="0"/>
+                </Grid>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,18,0,0">
+                    <TextBlock x:Name="StepYooma" Text="●  yooma + CYBER" Foreground="#66707A" FontSize="11"/>
+                    <TextBlock Text="     " />
+                    <TextBlock x:Name="StepResolver" Text="●  SteamID" Foreground="#66707A" FontSize="11"/>
+                    <TextBlock Text="     " />
+                    <TextBlock x:Name="StepInventory" Text="●  Inventory" Foreground="#66707A" FontSize="11"/>
+                    <TextBlock Text="     " />
+                    <TextBlock x:Name="StepPrices" Text="●  Price Engine" Foreground="#66707A" FontSize="11"/>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+        <TextBlock Text="v0.4.1 FixSteamID" Foreground="#58616A" FontSize="10" Margin="20" HorizontalAlignment="Left" VerticalAlignment="Bottom"/>
+    </Grid>
+</Window>
