@@ -43,7 +43,12 @@ public sealed class RenderedDomLoader
         if (!IsAvailable)
             return new RenderedDomResult(fallbackHtml ?? string.Empty, false, "HttpClient", "Microsoft Edge/Chrome не найден для JavaScript DOM fallback.");
 
-        await BrowserGate.WaitAsync(ct);
+        // Do not queue every SPA page behind two Chromium slots.  The caller can ask
+        // for many modes at once; two are probed now and the rest are naturally picked
+        // up on following cycles because successful pages are cached above.
+        if (!await BrowserGate.WaitAsync(TimeSpan.FromMilliseconds(180), ct))
+            return new RenderedDomResult(fallbackHtml ?? string.Empty, false, _browserName + " DevTools", "Browser probe занят; страница отложена до следующего цикла.");
+
         try
         {
             if (!forceRefresh && _cache.TryGetValue(url, out cached) && DateTime.UtcNow - cached.LoadedUtc < CacheTtl)
@@ -64,7 +69,9 @@ public sealed class RenderedDomLoader
                 }
 
                 ct.ThrowIfCancellationRequested();
-                var dump = await LoadViaDumpDomAsync(url, profileDir, timeout.Token);
+                var dumpProfileDir = Path.Combine(profileDir, "dump-profile");
+                Directory.CreateDirectory(dumpProfileDir);
+                var dump = await LoadViaDumpDomAsync(url, dumpProfileDir, timeout.Token);
                 if (dump.Rendered && dump.Html.Length >= 300)
                 {
                     var note = string.IsNullOrWhiteSpace(cdp.Error)
