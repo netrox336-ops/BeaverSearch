@@ -12,8 +12,12 @@
 
 - [ ] Monitoring запускается без ручного IP.
 - [ ] Diagnostics показывает yooma HTTP/render pages.
-- [ ] При SPA-shell включается Edge/Chrome DOM fallback.
-- [ ] В live roster появляется 17-значный SteamID64 из элемента/profile/state.
+- [ ] При SPA-shell включается Edge/Chrome DevTools probe.
+- [ ] `.server.loading` не приводит к вечному `Ожидание`: максимум 2 browser probes заняты одновременно, остальные routes откладываются на следующий цикл.
+- [ ] В `source-probe.log` появляется строка `cards/loading/clicks/identities/resources/replayJson/networkJson/wsFrames`.
+- [ ] `/card/<17-digit SteamID64>` из player element/state распознаётся как подтверждённый SteamID64.
+- [ ] JSON из XHR/fetch/DevTools Network response проходит через parser.
+- [ ] API на project-поддомене не отбрасывается только из-за отличающегося host.
 - [ ] 32-bit Steam AccountID/Steam2/Steam3 при наличии корректно нормализуется в SteamID64.
 - [ ] Ник не используется для поиска Steam-профиля.
 
@@ -22,8 +26,20 @@
 - [ ] Diagnostics показывает CYBERSHOKE batch pages и render count.
 - [ ] Mode/server cards появляются в Servers.
 - [ ] Player DOM/state с Steam identity превращается в SteamID64.
-- [ ] Rolling batches обновляют разные режимы без одновременного запуска десятков browser processes.
+- [ ] XHR/fetch JSON response body считывается через DevTools `Network.getResponseBody`.
+- [ ] Текстовые WebSocket / Socket.IO frames с player identity попадают в parser stream.
+- [ ] Rolling snapshots обновляют разные режимы без одновременного запуска десятков browser processes.
 - [ ] Один SteamID из CYBERSHOKE и yooma.su не запускает два inventory scans.
+
+## Browser probe / diagnostics
+
+- [ ] На машине с Edge `RenderEngine` показывает `Microsoft Edge DevTools`; с Chrome — `Google Chrome DevTools`.
+- [ ] Временный browser profile создаётся в `%TEMP%\BeaverSearch\browser` и удаляется после probe.
+- [ ] Пользовательский browser profile/cookies не используются.
+- [ ] При недоступном DevTools используется `--dump-dom` fallback с отдельным temporary profile.
+- [ ] При занятом BrowserGate страница откладывается, а monitoring cycle не зависает в длинной очереди.
+- [ ] `%LOCALAPPDATA%\BeaverSearch\source-probe.log` содержит URL реально увиденных public endpoints.
+- [ ] Stop Monitoring отменяет browser/inventory work и UI не зависает.
 
 ## Steam / inventory
 
@@ -48,20 +64,10 @@
 - [ ] DataGrid selection остаётся тёмным.
 - [ ] Hover / pressed / focus состояния согласованы.
 
-## Packaging
+## Packaging / repository
 
 - [ ] README / CHANGELOG / TEST-CHECKLIST / THIRD-PARTY-NOTICES соответствуют v0.4.1 FixSteamID.
 - [ ] Нет `bin/`, `obj/`, `.vs/`, `.tmp`.
-- [ ] ZIP integrity PASS.
-- [ ] SHA-256 посчитан после финальной упаковки.
-## FixSteamID r3 / live sources
-
-- [ ] После `Monitoring ON` CYBERSHOKE server catalog появляется без ожидания завершения browser probe.
-- [ ] `yooma.su` и `CYBERSHOKE` не остаются бесконечно в статусе `Ожидание`.
-- [ ] Через 1–2 цикла Diagnostics показывает `render > 0` или понятный browser error.
-- [ ] При сетевых live payloads счётчик `API/WS` становится больше нуля.
-- [ ] `%LOCALAPPDATA%\BeaverSearch\source-probe.log` создаётся и содержит `OK`, `TIMEOUT` или `ERROR` для probe URL.
-- [ ] CYBERSHOKE cards вида `#41 DM` + `15/16 | de_mirage` создают строки серверов.
-- [ ] SteamID64/AccountID из `profile`, steam/account field, XHR/fetch, WebSocket или EventSource попадает в Inventory Scanner без nickname resolver.
-- [ ] Stop Monitoring отменяет browser/inventory work и UI не зависает.
-
+- [ ] В репозитории отсутствует `.github/workflows` — CI/Actions для разработки намеренно не используется.
+- [ ] ZIP integrity PASS для выдаваемой тестовой/финальной сборки.
+- [ ] SHA-256 считается после финальной упаковки.
