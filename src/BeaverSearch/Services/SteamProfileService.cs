@@ -21,7 +21,7 @@ public sealed class SteamProfileService
         var url = $"https://steamcommunity.com/profiles/{steamId64}?xml=1";
         try
         {
-            var xml = await _http.GetStringAsync(url, ct);
+            var xml = await _http.GetStringAsync(url, ct).ConfigureAwait(false);
             var doc = XDocument.Parse(xml);
             var root = doc.Root;
             var nick = root?.Element("steamID")?.Value?.Trim();
@@ -31,6 +31,7 @@ public sealed class SteamProfileService
                 $"https://steamcommunity.com/profiles/{steamId64}",
                 avatar ?? string.Empty);
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             return new SteamProfile(steamId64, fallbackNick,
