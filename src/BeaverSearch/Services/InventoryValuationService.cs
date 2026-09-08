@@ -7,6 +7,7 @@ public sealed class InventoryValuationService
     private readonly SteamInventoryService _inventory;
     private readonly SkinportPriceProvider _prices;
     private readonly CsFloatComparableProvider _csFloat;
+    private readonly SemaphoreSlim _playerValuationGate = new(4, 4);
 
     public InventoryValuationService(
         SteamInventoryService inventory,
@@ -22,16 +23,38 @@ public sealed class InventoryValuationService
 
     public async Task<PlayerValuation> ValuePlayerAsync(string steamId64, string csFloatApiKey, CancellationToken ct)
     {
-        // Inventory/network work must never run on the WPF dispatcher. Each game is
-        // independent and the provider has its own global request/cache limits.
-        var cs = ValueGameAsync(steamId64, 730, csFloatApiKey, ct);
-        var dota = ValueGameAsync(steamId64, 570, string.Empty, ct);
-        var rust = ValueGameAsync(steamId64, 252490, string.Empty, ct);
-        await Task.WhenAll(cs, dota, rust).ConfigureAwait(false);
-        return new PlayerValuation(
-            await cs.ConfigureAwait(false),
-            await dota.ConfigureAwait(false),
-            await rust.ConfigureAwait(false));
+        // MainViewModel may queue many players at once. Only four heavy valuation
+        // pipelines are allowed to run simultaneously so browser/network/JSON work
+        // cannot saturate the machine and freeze the WPF dispatcher.
+        await _playerValuationGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var cs = ValueGameAsync(steamId64, 730, csFloatApiKey, ct);
+            var dota = ValueGameAsync(steamId64, 570, string.Empty, ct);
+            var rust = ValueGameAsync(steamId64, 252490, string.Empty, ct);
+            await Task.WhenAll(cs, dota, rust).ConfigureAwait(false);
+
+            var result = new PlayerValuation(
+                await cs.ConfigureAwait(false),
+                await dota.ConfigureAwait(false),
+                await rust.ConfigureAwait(false));
+
+            // Do not poison the 24h player cache with a fake 0 ₽ result when Steam
+            // Market temporarily returned no usable prices. ProcessPlayerAsync writes
+            // SteamChecks only after this method succeeds, so throwing here forces a
+            // later retry instead of hiding the player for 24 hours.
+            var nonEmpty = new[] { result.Cs2, result.Dota2, result.Rust }
+                .Where(x => x.Accessible && x.ItemCount > 0)
+                .ToArray();
+            if (nonEmpty.Length > 0 && nonEmpty.All(x => x.ValueRub <= 0 && x.UnpricedItems >= x.ItemCount))
+                throw new HttpRequestException("Steam Market не вернул ни одной цены для непустого публичного инвентаря; оценка не кэшируется.");
+
+            return result;
+        }
+        finally
+        {
+            _playerValuationGate.Release();
+        }
     }
 
     private async Task<GameValuation> ValueGameAsync(string steamId64, int appId, string csFloatApiKey, CancellationToken ct)
