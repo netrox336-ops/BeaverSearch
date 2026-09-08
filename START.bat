@@ -54,6 +54,10 @@ echo Running static preflight...
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\STATIC-PREFLIGHT.ps1"
 if errorlevel 1 goto preflight_failed
 
+echo Running performance/price hotfix preflight...
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\HOTFIX-PREFLIGHT.ps1"
+if errorlevel 1 goto hotfix_preflight_failed
+
 rem WPF creates temporary *_wpftmp projects under obj. Always clear obj so an
 rem old/corrupt Win32 resource or generated BAML cannot poison the next build.
 if exist "%OBJ_DIR%" (
@@ -99,6 +103,13 @@ echo [ERROR] STATIC-PREFLIGHT failed. See STATIC-PREFLIGHT.txt.
 call :show_log
 pause
 exit /b 3
+
+:hotfix_preflight_failed
+echo.
+echo [ERROR] HOTFIX-PREFLIGHT failed. Performance/price-engine source markers are inconsistent.
+call :show_log
+pause
+exit /b 4
 
 :build_failed
 echo.
