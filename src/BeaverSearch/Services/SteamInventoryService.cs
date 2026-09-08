@@ -29,14 +29,14 @@ public sealed class SteamInventoryService
             var url = $"https://steamcommunity.com/inventory/{steamId64}/{appId}/2?l=english&count=5000";
             if (!string.IsNullOrWhiteSpace(startAssetId)) url += $"&start_assetid={Uri.EscapeDataString(startAssetId)}";
 
-            using var response = await GetWithRetryAsync(url, ct);
+            using var response = await GetWithRetryAsync(url, ct).ConfigureAwait(false);
             if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
                 return new SteamInventory { AppId = appId, Accessible = false };
             if (!response.IsSuccessStatusCode)
                 return new SteamInventory { AppId = appId, Accessible = false };
 
-            await using var stream = await response.Content.ReadAsStreamAsync(ct);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+            await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
             var root = doc.RootElement;
             accessible = root.TryGetProperty("success", out var success) &&
                          (success.ValueKind == JsonValueKind.Number ? success.GetInt32() == 1 : success.GetBoolean());
@@ -84,21 +84,20 @@ public sealed class SteamInventoryService
         return new SteamInventory { AppId = appId, Accessible = accessible, Assets = allAssets, Descriptions = descriptions };
     }
 
-
     private async Task<HttpResponseMessage> GetWithRetryAsync(string url, CancellationToken ct)
     {
         HttpResponseMessage? last = null;
         for (var attempt = 0; attempt < 3; attempt++)
         {
             last?.Dispose();
-            last = await _http.GetAsync(url, ct);
+            last = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             var code = (int)last.StatusCode;
             if (code != 429 && code < 500) return last;
             if (attempt < 2)
             {
                 var delay = last.Headers.RetryAfter?.Delta ?? TimeSpan.FromMilliseconds(350 * (attempt + 1));
                 if (delay > TimeSpan.FromSeconds(4)) delay = TimeSpan.FromSeconds(4);
-                await Task.Delay(delay, ct);
+                await Task.Delay(delay, ct).ConfigureAwait(false);
             }
         }
         return last!;
