@@ -9,33 +9,36 @@ function Need([string]$path, [string]$pattern, [string]$message) {
 }
 
 $market = '.\src\BeaverSearch\Services\SteamMarketPriceProvider.cs'
+$bulk = '.\src\BeaverSearch\Services\SkinportPriceProvider.cs'
 $valuation = '.\src\BeaverSearch\Services\InventoryValuationService.cs'
 $inventory = '.\src\BeaverSearch\Services\SteamInventoryService.cs'
 $local = '.\src\BeaverSearch\Services\LocalStore.cs'
 $cache = '.\src\BeaverSearch\Models\CacheModels.cs'
 $dom = '.\src\BeaverSearch\Services\RenderedDomLoader.cs'
-$legacyPrice = '.\src\BeaverSearch\Services\SkinportPriceProvider.cs'
+$vm = '.\src\BeaverSearch\ViewModels\MainViewModel.cs'
 
-Need $market 'steamcommunity\.com/market/priceoverview' 'Steam Community Market priceoverview endpoint marker missing.'
-Need $market 'currency=5' 'Steam Market RUB currency marker missing.'
+Need $market 'steamcommunity\.com/market/priceoverview' 'Steam Community Market fallback endpoint marker missing.'
+Need $market 'currency=5' 'Steam Market RUB fallback currency marker missing.'
 Need $market 'PositiveTtl\s*=\s*TimeSpan\.FromMinutes\(10\)' 'Steam Market positive cache is not 10 minutes.'
-Need $market 'new\(4, 4\)' 'Steam Market request gate is not 4.'
+Need $bulk 'api\.skinport\.com/v1/items' 'Lazy bulk price catalog endpoint marker missing.'
+Need $bulk 'CatalogTtl\s*=\s*TimeSpan\.FromMinutes\(20\)' 'Bulk catalog cache is not 20 minutes.'
+Need $bulk '_catalogDownloadGate\s*=\s*new\(1, 1\)' 'Bulk catalog downloads are not serialized.'
+Need $bulk 'MaxSteamFallbackNames\s*=\s*16' 'Bounded Steam fallback limit is missing.'
 Need $valuation '_playerValuationGate\s*=\s*new\(4, 4\)' 'Heavy player valuation gate is not 4.'
 Need $valuation 'PricingAvailable' 'False-zero price protection marker missing.'
 Need $inventory '_inventoryRequestGate\s*=\s*new\(6, 6\)' 'Steam inventory request gate is not 6.'
 Need $inventory 'ConfigureAwait\(false\)' 'Steam inventory off-dispatcher awaits missing.'
-Need $cache 'PriceEngineVersion\s*\{\s*get;\s*set;\s*\}\s*=\s*2' 'PriceEngineVersion 2 marker missing.'
-Need $local 'CurrentPriceEngineVersion\s*=\s*2' 'LocalStore price-engine migration marker missing.'
+Need $cache 'PriceEngineVersion\s*\{\s*get;\s*set;\s*\}\s*=\s*3' 'PriceEngineVersion 3 marker missing.'
+Need $local 'CurrentPriceEngineVersion\s*=\s*3' 'LocalStore price-engine v3 migration marker missing.'
 Need $local 'FlushCacheLoopAsync' 'Debounced cache writer marker missing.'
 Need $dom 'CacheTtl\s*=\s*TimeSpan\.FromSeconds\(75\)' 'Browser probe cache TTL is not 75 seconds.'
 Need $dom 'BrowserGate\s*=\s*new\(1, 1\)' 'Browser probe concurrency is not 1.'
 Need $dom 'ProcessPriorityClass\.BelowNormal' 'Browser BelowNormal priority marker missing.'
 Need $dom 'FragmentScript' 'Compact DOM fragment capture marker missing.'
-Need $dom 'liteChars' 'Compact DOM diagnostics marker missing.'
-Need $legacyPrice 'SteamMarketPriceProvider' 'Legacy price facade does not delegate to Steam Market.'
-
-$serviceText = (Get-ChildItem '.\src\BeaverSearch\Services' -Filter '*.cs' -File | ForEach-Object { Get-Content $_.FullName -Raw -Encoding UTF8 }) -join "`n"
-if ($serviceText -match 'api\.skinport\.com/v1/items') { $issues.Add('Full Skinport catalog endpoint is active again; this hotfix forbids it.') | Out-Null }
+Need $vm 'CommunityServerBatchSize\s*=\s*10' 'Monitoring server batch is not 10.'
+Need $vm '_scanGate\s*=\s*new\(4, 4\)' 'Player scan gate is not 4.'
+Need $vm 'WaitForCurrentBatchScansAsync' 'Sequential batch completion wait marker missing.'
+Need $vm 'Task\.Run\(\(\)\s*=>\s*loader\(ct\)' 'Source parsing is not moved off the WPF dispatcher.'
 
 if ($issues.Count -gt 0) {
     Write-Host 'BeaverSearch HOTFIX PREFLIGHT: FAIL'
@@ -44,8 +47,10 @@ if ($issues.Count -gt 0) {
 }
 
 Write-Host 'BeaverSearch HOTFIX PREFLIGHT: PASS'
-Write-Host '- Steam Market RUB selective pricing: checked'
-Write-Host '- false-zero 24h cache migration: checked'
+Write-Host '- monitoring: sequential batches of 10 servers: checked'
+Write-Host '- source HTML/JSON parsing off WPF dispatcher: checked'
+Write-Host '- pricing: 20m bulk RUB catalog + bounded Steam Market fallback: checked'
+Write-Host '- false-zero cache migration v3: checked'
 Write-Host '- valuation concurrency 4 / inventory requests 6: checked'
 Write-Host '- debounced cache writes: checked'
 Write-Host '- browser probe: 1 process / 75s cache / compact DOM / BelowNormal: checked'
