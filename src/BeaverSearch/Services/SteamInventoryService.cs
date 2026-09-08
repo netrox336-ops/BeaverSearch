@@ -8,6 +8,7 @@ namespace BeaverSearch.Services;
 public sealed class SteamInventoryService
 {
     private readonly HttpClient _http;
+    private readonly SemaphoreSlim _inventoryRequestGate = new(6, 6);
 
     public SteamInventoryService()
     {
@@ -18,6 +19,19 @@ public sealed class SteamInventoryService
     }
 
     public async Task<SteamInventory> GetInventoryAsync(string steamId64, int appId, CancellationToken ct)
+    {
+        await _inventoryRequestGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            return await GetInventoryCoreAsync(steamId64, appId, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _inventoryRequestGate.Release();
+        }
+    }
+
+    private async Task<SteamInventory> GetInventoryCoreAsync(string steamId64, int appId, CancellationToken ct)
     {
         var allAssets = new List<InventoryAsset>();
         var descriptions = new Dictionary<string, InventoryDescription>(StringComparer.Ordinal);
