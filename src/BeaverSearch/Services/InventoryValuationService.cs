@@ -5,12 +5,12 @@ namespace BeaverSearch.Services;
 public sealed class InventoryValuationService
 {
     private readonly SteamInventoryService _inventory;
-    private readonly SteamMarketPriceProvider _prices;
+    private readonly SkinportPriceProvider _prices;
     private readonly CsFloatComparableProvider _csFloat;
 
     public InventoryValuationService(
         SteamInventoryService inventory,
-        SteamMarketPriceProvider prices,
+        SkinportPriceProvider prices,
         CsFloatComparableProvider csFloat)
     {
         _inventory = inventory;
