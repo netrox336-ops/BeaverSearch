@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>BeaverSearch</AssemblyName>
+    <RootNamespace>BeaverSearch</RootNamespace>
+    <Version>0.4.1</Version>
+    <AssemblyVersion>0.4.1.0</AssemblyVersion>
+    <FileVersion>0.4.1.0</FileVersion>
+    <ApplicationIcon>Assets\Brand\BeaverSearch.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\Brand\*.png" />
+    <Resource Include="Assets\Games\*.png" />
+    <Resource Include="Assets\Sidebar\*.png" />
+  </ItemGroup>
+</Project>

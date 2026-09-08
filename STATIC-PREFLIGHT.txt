@@ -1,0 +1,24 @@
+BeaverSearch v0.4.1 FixSteamID STATIC PREFLIGHT: PASS
+
+Checks:
+- XAML XML parsed: 8/8
+- Duplicate attribute/property-element assignments: 0
+- StaticResource refs: 394, project keys: 67, missing: 0
+- Referenced packaged assets: 18, missing: 0
+- Event handlers checked: 19, missing: 0
+- PanningMode / TargetName / Window.RenderTransform: checked
+- Binding modes: writable inputs + computed ProgressBar OneWay checked
+- MainTabs initial page: MonitorView checked
+- FixSteamID pipeline: yooma.su + CYBERSHOKE rendered DOM/state -> exact Steam identity checked
+- Rendered DOM fallback: Microsoft Edge / Google Chrome headless with disposable profile checked
+- Steam identity normalization: SteamID64 / AccountID / Steam2 / Steam3 markers checked
+- Legacy A2sClient / GameMonitoringResolver runtime files: absent
+- Yooma current routes + numbered fallback: checked
+- CYBERSHOKE rolling mode-page batch: 8
+- Inventory scan gate: 8; Steam scan TTL: 24h
+- Version 0.4.1 / assembly 0.4.1.0 / PerMonitorV2 / release files: checked
+- C# lexical delimiter scan: 38 files, issues: 0
+
+No static preflight issues detected.
+
+NOTE: STATIC-PREFLIGHT does not replace the native Windows WPF compiler/runtime test. START.bat performs that build before launch.
