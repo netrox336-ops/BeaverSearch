@@ -9,15 +9,15 @@ using System.Text.Json;
 namespace BeaverSearch.Services;
 
 /// <summary>
-/// Loads a monitoring page after its client-side JavaScript has finished.
+/// Loads monitoring pages after client-side JavaScript has finished.
 ///
-/// v0.4.1 FixSteamID R4 uses the Chromium DevTools Protocol first. This lets
-/// BeaverSearch wait for SPA hydration, open player/online controls, inspect the
-/// rendered DOM and replay same-origin public read endpoints discovered through
-/// PerformanceResourceTiming. The old --dump-dom path is kept as a fallback.
+/// v0.4.1 FixSteamID uses Chromium DevTools first: SPA hydration, player-card
+/// interaction, XHR/fetch response capture and WebSocket frame capture are merged
+/// back into markup that the existing source parsers understand. The old
+/// --dump-dom path remains a fallback.
 ///
-/// A disposable browser profile is always used. User cookies, logins and the
-/// normal Edge/Chrome profile are never touched.
+/// A disposable browser profile is always used. BeaverSearch never reads the
+/// user's Edge/Chrome profile, cookies or logged-in sessions.
 /// </summary>
 public sealed class RenderedDomLoader
 {
@@ -43,9 +43,9 @@ public sealed class RenderedDomLoader
         if (!IsAvailable)
             return new RenderedDomResult(fallbackHtml ?? string.Empty, false, "HttpClient", "Microsoft Edge/Chrome не найден для JavaScript DOM fallback.");
 
-        // Do not queue every SPA page behind two Chromium slots.  The caller can ask
-        // for many modes at once; two are probed now and the rest are naturally picked
-        // up on following cycles because successful pages are cached above.
+        // Never queue every monitoring mode behind two Chromium instances. Two pages
+        // are probed now; the rest are deferred to the next monitoring cycle. Pages
+        // already completed are served from the cache above, so probing rolls forward.
         if (!await BrowserGate.WaitAsync(TimeSpan.FromMilliseconds(180), ct))
             return new RenderedDomResult(fallbackHtml ?? string.Empty, false, _browserName + " DevTools", "Browser probe занят; страница отложена до следующего цикла.");
 
@@ -125,23 +125,37 @@ public sealed class RenderedDomLoader
 
             using var ws = new ClientWebSocket();
             await ws.ConnectAsync(new Uri(socketUrl), ct);
-            var commandId = 0;
-            await SendCommandAsync(ws, ref commandId, "Page.enable", null, ct);
-            await SendCommandAsync(ws, ref commandId, "Runtime.enable", null, ct);
-            await SendCommandAsync(ws, ref commandId, "Page.navigate", new { url }, ct);
+            var state = new CdpState();
 
-            // Let the new execution context replace about:blank before evaluation.
+            await SendCommandAsync(ws, state, "Page.enable", null, ct);
+            await SendCommandAsync(ws, state, "Runtime.enable", null, ct);
+            await SendCommandAsync(ws, state, "Network.enable", new { maxTotalBufferSize = 20_000_000, maxResourceBufferSize = 2_000_000 }, ct);
+            await SendCommandAsync(ws, state, "Page.navigate", new { url }, ct);
+
+            // Let the new execution context replace about:blank before evaluating JS.
             await Task.Delay(450, ct);
 
-            var interactionJson = await EvaluateStringWithRetryAsync(ws, ref commandId, InteractionScript, ct) ?? "{}";
-            var captureJson = await EvaluateStringWithRetryAsync(ws, ref commandId, CaptureScript, ct) ?? "{}";
-            var html = await EvaluateStringWithRetryAsync(ws, ref commandId, "document.documentElement ? document.documentElement.outerHTML : ''", ct) ?? string.Empty;
+            var interactionJson = await EvaluateStringWithRetryAsync(ws, state, InteractionScript, ct) ?? "{}";
+            var captureJson = await EvaluateStringWithRetryAsync(ws, state, CaptureScript, ct) ?? "{}";
 
-            var enrichment = BuildCaptureMarkup(captureJson, out var resources, out var payloads);
-            if (!string.IsNullOrWhiteSpace(enrichment)) html += enrichment;
+            // Network.responseReceived events were collected while the async scripts
+            // above were running. Reading their bodies through CDP works even when a
+            // public endpoint lives on a project subdomain and normal page re-fetch is
+            // restricted by CORS.
+            var networkCapture = await CaptureNetworkPayloadsAsync(ws, state, ct);
+            var html = await EvaluateStringWithRetryAsync(ws, state, "document.documentElement ? document.documentElement.outerHTML : ''", ct) ?? string.Empty;
 
-            var summary = BuildProbeSummary(interactionJson, resources, payloads);
-            WriteProbeLog(url, summary, captureJson);
+            var enrichment = BuildCaptureMarkup(captureJson, out var resources, out var replayPayloads);
+            html += enrichment;
+            html += networkCapture.Markup;
+
+            var summary = BuildProbeSummary(
+                interactionJson,
+                resources,
+                replayPayloads,
+                networkCapture.JsonBodies,
+                networkCapture.WebSocketFrames);
+            WriteProbeLog(url, summary, captureJson, networkCapture.Urls);
 
             if (string.IsNullOrWhiteSpace(html) || html.Length < 300)
                 return new RenderedDomResult(string.Empty, false, _browserName + " DevTools", "DevTools вернул пустой DOM. " + summary);
@@ -152,6 +166,135 @@ public sealed class RenderedDomLoader
         {
             TryKill(process);
         }
+    }
+
+    private async Task<NetworkCapture> CaptureNetworkPayloadsAsync(ClientWebSocket ws, CdpState state, CancellationToken ct)
+    {
+        var markup = new StringBuilder();
+        var urls = new List<string>();
+        var jsonBodies = 0;
+
+        var candidates = state.Responses
+            .GroupBy(x => x.RequestId, StringComparer.Ordinal)
+            .Select(g => g.Last())
+            .Where(IsInterestingNetworkResponse)
+            .Take(28)
+            .ToArray();
+
+        foreach (var responseRef in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            var response = await SendCommandAsync(ws, state, "Network.getResponseBody", new { requestId = responseRef.RequestId }, ct);
+            var body = ExtractResponseBody(response);
+            if (string.IsNullOrWhiteSpace(body) || body.Length > 1_800_000) continue;
+            if (!LooksLikeJson(body) && !LooksLikeIdentityPayload(body)) continue;
+
+            urls.Add(responseRef.Url);
+            if (LooksLikeJson(body))
+            {
+                jsonBodies++;
+                markup.Append("\n<script type=\"application/json\" data-beaver-network=\"")
+                    .Append(WebUtility.HtmlEncode(responseRef.Url))
+                    .Append("\">")
+                    .Append(WebUtility.HtmlEncode(body))
+                    .Append("</script>");
+            }
+            else
+            {
+                markup.Append("\n<script data-beaver-network=\"")
+                    .Append(WebUtility.HtmlEncode(responseRef.Url))
+                    .Append("\">")
+                    .Append(WebUtility.HtmlEncode(body))
+                    .Append("</script>");
+            }
+        }
+
+        var wsFrames = 0;
+        foreach (var rawFrame in state.WebSocketFrames.Take(80))
+        {
+            if (string.IsNullOrWhiteSpace(rawFrame) || rawFrame.Length > 700_000) continue;
+            var normalized = NormalizeSocketPayload(rawFrame);
+            if (string.IsNullOrWhiteSpace(normalized) || (!LooksLikeJson(normalized) && !LooksLikeIdentityPayload(normalized))) continue;
+            wsFrames++;
+            if (LooksLikeJson(normalized))
+            {
+                markup.Append("\n<script type=\"application/json\" data-beaver-websocket=\"1\">")
+                    .Append(WebUtility.HtmlEncode(normalized))
+                    .Append("</script>");
+            }
+            else
+            {
+                markup.Append("\n<script data-beaver-websocket=\"1\">")
+                    .Append(WebUtility.HtmlEncode(normalized))
+                    .Append("</script>");
+            }
+        }
+
+        return new NetworkCapture(markup.ToString(), jsonBodies, wsFrames, urls);
+    }
+
+    private static bool IsInterestingNetworkResponse(NetworkResponseRef item)
+    {
+        if (!Uri.TryCreate(item.Url, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme is not ("http" or "https")) return false;
+
+        var path = uri.AbsolutePath.ToLowerInvariant();
+        foreach (var suffix in new[] { ".js", ".css", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".mp4", ".webm" })
+            if (path.EndsWith(suffix, StringComparison.Ordinal)) return false;
+
+        if (item.Type.Equals("XHR", StringComparison.OrdinalIgnoreCase) ||
+            item.Type.Equals("Fetch", StringComparison.OrdinalIgnoreCase) ||
+            item.Type.Equals("EventSource", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (item.MimeType.Contains("json", StringComparison.OrdinalIgnoreCase)) return true;
+        var text = (uri.AbsolutePath + uri.Query).ToLowerInvariant();
+        return new[] { "api", "player", "server", "online", "monitor", "public-read", "roster", "live" }.Any(text.Contains);
+    }
+
+    private static string? ExtractResponseBody(JsonElement? response)
+    {
+        if (response is null) return null;
+        var root = response.Value;
+        if (!root.TryGetProperty("result", out var result)) return null;
+        if (!result.TryGetProperty("body", out var bodyElement) || bodyElement.ValueKind != JsonValueKind.String) return null;
+        var body = bodyElement.GetString();
+        if (string.IsNullOrEmpty(body)) return body;
+
+        if (result.TryGetProperty("base64Encoded", out var encoded) && encoded.ValueKind == JsonValueKind.True)
+        {
+            try { return Encoding.UTF8.GetString(Convert.FromBase64String(body)); }
+            catch { return null; }
+        }
+        return body;
+    }
+
+    private static string NormalizeSocketPayload(string payload)
+    {
+        var value = payload.Trim();
+        // Socket.IO frames often prefix JSON with 42 (event), 0 (open) or 4.
+        for (var i = 0; i < Math.Min(6, value.Length); i++)
+        {
+            if (value[i] is '{' or '[') return value[i..];
+        }
+        return value;
+    }
+
+    private static bool LooksLikeIdentityPayload(string value)
+    {
+        if (value.Contains("/card/", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("/profile/", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("steamid", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("steam_id", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("account_id", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        for (var i = 0; i + 17 <= value.Length; i++)
+        {
+            if (!value.AsSpan(i, 4).SequenceEqual("7656".AsSpan())) continue;
+            if (value.AsSpan(i, 17).ToString().All(char.IsDigit)) return true;
+        }
+        return false;
     }
 
     private async Task<RenderedDomResult> LoadViaDumpDomAsync(string url, string profileDir, CancellationToken ct)
@@ -231,8 +374,8 @@ public sealed class RenderedDomLoader
                 {
                     if (!item.TryGetProperty("type", out var type) || !string.Equals(type.GetString(), "page", StringComparison.OrdinalIgnoreCase))
                         continue;
-                    if (item.TryGetProperty("webSocketDebuggerUrl", out var ws) && !string.IsNullOrWhiteSpace(ws.GetString()))
-                        return ws.GetString();
+                    if (item.TryGetProperty("webSocketDebuggerUrl", out var socket) && !string.IsNullOrWhiteSpace(socket.GetString()))
+                        return socket.GetString();
                 }
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
@@ -242,9 +385,9 @@ public sealed class RenderedDomLoader
         return null;
     }
 
-    private static async Task<JsonElement?> SendCommandAsync(ClientWebSocket ws, ref int nextId, string method, object? parameters, CancellationToken ct)
+    private static async Task<JsonElement?> SendCommandAsync(ClientWebSocket ws, CdpState state, string method, object? parameters, CancellationToken ct)
     {
-        var id = Interlocked.Increment(ref nextId);
+        var id = Interlocked.Increment(ref state.NextId);
         var payload = JsonSerializer.Serialize(new { id, method, @params = parameters ?? new { } });
         var bytes = Encoding.UTF8.GetBytes(payload);
         await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
@@ -265,17 +408,47 @@ public sealed class RenderedDomLoader
             if (ms.Length == 0) continue;
             using var doc = JsonDocument.Parse(ms.ToArray());
             var root = doc.RootElement;
-            if (!root.TryGetProperty("id", out var responseId) || responseId.GetInt32() != id) continue;
-            return root.Clone();
+            if (root.TryGetProperty("id", out var responseId) && responseId.ValueKind == JsonValueKind.Number && responseId.GetInt32() == id)
+                return root.Clone();
+
+            CaptureEvent(root, state);
         }
         return null;
     }
 
-    private static async Task<string?> EvaluateStringWithRetryAsync(ClientWebSocket ws, ref int nextId, string expression, CancellationToken ct)
+    private static void CaptureEvent(JsonElement root, CdpState state)
+    {
+        if (!root.TryGetProperty("method", out var methodElement) || methodElement.ValueKind != JsonValueKind.String) return;
+        var method = methodElement.GetString();
+        if (!root.TryGetProperty("params", out var parameters) || parameters.ValueKind != JsonValueKind.Object) return;
+
+        if (method == "Network.responseReceived" && state.Responses.Count < 180)
+        {
+            if (!parameters.TryGetProperty("requestId", out var requestIdElement) || requestIdElement.ValueKind != JsonValueKind.String) return;
+            if (!parameters.TryGetProperty("response", out var response) || response.ValueKind != JsonValueKind.Object) return;
+            var requestId = requestIdElement.GetString();
+            var url = response.TryGetProperty("url", out var urlElement) && urlElement.ValueKind == JsonValueKind.String ? urlElement.GetString() : null;
+            if (string.IsNullOrWhiteSpace(requestId) || string.IsNullOrWhiteSpace(url)) return;
+            var mime = response.TryGetProperty("mimeType", out var mimeElement) && mimeElement.ValueKind == JsonValueKind.String ? mimeElement.GetString() ?? string.Empty : string.Empty;
+            var type = parameters.TryGetProperty("type", out var typeElement) && typeElement.ValueKind == JsonValueKind.String ? typeElement.GetString() ?? string.Empty : string.Empty;
+            state.Responses.Add(new NetworkResponseRef(requestId!, url!, mime, type));
+            return;
+        }
+
+        if (method == "Network.webSocketFrameReceived" && state.WebSocketFrames.Count < 120)
+        {
+            if (!parameters.TryGetProperty("response", out var response) || response.ValueKind != JsonValueKind.Object) return;
+            if (!response.TryGetProperty("payloadData", out var payload) || payload.ValueKind != JsonValueKind.String) return;
+            var value = payload.GetString();
+            if (!string.IsNullOrWhiteSpace(value)) state.WebSocketFrames.Add(value!);
+        }
+    }
+
+    private static async Task<string?> EvaluateStringWithRetryAsync(ClientWebSocket ws, CdpState state, string expression, CancellationToken ct)
     {
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            var response = await SendCommandAsync(ws, ref nextId, "Runtime.evaluate", new
+            var response = await SendCommandAsync(ws, state, "Runtime.evaluate", new
             {
                 expression,
                 awaitPromise = true,
@@ -352,7 +525,7 @@ public sealed class RenderedDomLoader
         return output.ToString();
     }
 
-    private static string BuildProbeSummary(string interactionJson, int resources, int payloads)
+    private static string BuildProbeSummary(string interactionJson, int resources, int replayPayloads, int networkBodies, int wsFrames)
     {
         var cards = 0;
         var clicks = 0;
@@ -368,7 +541,7 @@ public sealed class RenderedDomLoader
             loading = ReadInt(root, "loading");
         }
         catch (JsonException) { }
-        return $"probe cards={cards}, loading={loading}, clicks={clicks}, identities={identities}, resources={resources}, apiPayloads={payloads}";
+        return $"probe cards={cards}, loading={loading}, clicks={clicks}, identities={identities}, resources={resources}, replayJson={replayPayloads}, networkJson={networkBodies}, wsFrames={wsFrames}";
     }
 
     private static int ReadInt(JsonElement root, string property)
@@ -383,7 +556,7 @@ public sealed class RenderedDomLoader
         return span.Length > 1 && (span[0] == '{' || span[0] == '[');
     }
 
-    private static void WriteProbeLog(string pageUrl, string summary, string captureJson)
+    private static void WriteProbeLog(string pageUrl, string summary, string captureJson, IReadOnlyList<string> networkUrls)
     {
         try
         {
@@ -406,12 +579,13 @@ public sealed class RenderedDomLoader
             }
             catch (JsonException) { }
 
+            urls.AddRange(networkUrls);
             var lines = new List<string>
             {
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {pageUrl}",
                 "  " + summary
             };
-            lines.AddRange(urls.Select(x => "  resource: " + x));
+            lines.AddRange(urls.Distinct(StringComparer.OrdinalIgnoreCase).Take(50).Select(x => "  resource: " + x));
             File.AppendAllLines(path, lines);
         }
         catch { }
@@ -500,19 +674,25 @@ public sealed class RenderedDomLoader
     private const string CaptureScript = """
 (async () => {
   const interesting = /(api|player|players|server|servers|online|monitor|public-read|roster|live)/i;
-  const resources = [...new Set(performance.getEntriesByType('resource')
-    .map(e => e.name)
-    .filter(u => {
+  const hostParts = location.hostname.toLowerCase().replace(/^www\./, '').split('.');
+  const rootHost = hostParts.slice(-2).join('.');
+  const entries = performance.getEntriesByType('resource');
+  const resources = [...new Set(entries
+    .filter(e => {
       try {
-        const x = new URL(u, location.href);
-        if (x.origin !== location.origin) return false;
-        if (/\/assets\/|\/fonts\/|\.(?:png|jpe?g|webp|svg|woff2?|css|js)(?:\?|$)/i.test(x.pathname)) return false;
-        return interesting.test(x.pathname + x.search);
+        const x = new URL(e.name, location.href);
+        const h = x.hostname.toLowerCase();
+        const sameProject = h === rootHost || h.endsWith('.' + rootHost);
+        if (!sameProject) return false;
+        if (/\/assets\/|\/fonts\/|\.(?:png|jpe?g|webp|svg|ico|woff2?|ttf|css|js|mp4|webm)(?:\?|$)/i.test(x.pathname)) return false;
+        const initiator = (e.initiatorType || '').toLowerCase();
+        return initiator === 'fetch' || initiator === 'xmlhttprequest' || initiator === 'beacon' || interesting.test(x.pathname + x.search);
       } catch (_) { return false; }
-    }))].slice(0, 30);
+    })
+    .map(e => e.name))].slice(0, 40);
 
   const payloads = [];
-  for (const u of resources.slice(0, 18)) {
+  for (const u of resources.slice(0, 22)) {
     try {
       const r = await fetch(u, { credentials: 'include', cache: 'no-store' });
       if (!r.ok) continue;
@@ -547,6 +727,15 @@ public sealed class RenderedDomLoader
 })()
 """;
 
+    private sealed class CdpState
+    {
+        public int NextId;
+        public List<NetworkResponseRef> Responses { get; } = [];
+        public List<string> WebSocketFrames { get; } = [];
+    }
+
+    private sealed record NetworkResponseRef(string RequestId, string Url, string MimeType, string Type);
+    private sealed record NetworkCapture(string Markup, int JsonBodies, int WebSocketFrames, IReadOnlyList<string> Urls);
     private sealed record CacheEntry(DateTime LoadedUtc, string Html, string Engine, string? Note);
 }
 
