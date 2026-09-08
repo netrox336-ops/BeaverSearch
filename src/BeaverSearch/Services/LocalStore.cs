@@ -31,8 +31,19 @@ public sealed class LocalStore
 
     public async Task<CacheState> LoadCacheAsync()
     {
+        var hasVersionMarker = false;
+        try
+        {
+            if (File.Exists(_cachePath))
+            {
+                var raw = await File.ReadAllTextAsync(_cachePath).ConfigureAwait(false);
+                hasVersionMarker = raw.Contains("\"PriceEngineVersion\"", StringComparison.Ordinal);
+            }
+        }
+        catch { }
+
         var cache = await ReadAsync(_cachePath, new CacheState()).ConfigureAwait(false);
-        if (cache.PriceEngineVersion != CurrentPriceEngineVersion)
+        if (!hasVersionMarker || cache.PriceEngineVersion != CurrentPriceEngineVersion)
         {
             // Preserve exact SteamID/name discoveries, but force valuation to run again.
             // Old v0.4.1 builds could store a successful 24h check with a false 0 ₽ total.
