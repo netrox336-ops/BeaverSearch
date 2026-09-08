@@ -30,19 +30,16 @@
                         <RowDefinition Height="318"/>
                     </Grid.RowDefinitions>
 
-                    <!-- hamburger -->
                     <Grid Grid.Row="0" Margin="17,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Width="24" Height="20">
                         <Rectangle Height="1" Fill="#CCD2D8" VerticalAlignment="Top" Margin="2,3,2,0" RadiusX="1"/>
                         <Rectangle Height="1" Fill="#CCD2D8" VerticalAlignment="Center" Margin="2,0" RadiusX="1"/>
                         <Rectangle Height="1" Fill="#CCD2D8" VerticalAlignment="Bottom" Margin="2,0,2,3" RadiusX="1"/>
                     </Grid>
 
-                    <!-- exact brand crop from the approved visual system, cleaned to transparent PNG -->
                     <Grid Grid.Row="1" Margin="18,0,18,4">
-                        <Image Source="/Assets/Brand/sidebar_brand_transparent.png" Width="202" Height="136" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <Image Source="/Assets/Brand/sidebar_brand_transparent.png" Width="202" Height="136" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
                     </Grid>
 
-                    <!-- navigation -->
                     <StackPanel Grid.Row="2" Margin="0,4,0,0">
                         <RadioButton x:Name="NavMonitor" Style="{StaticResource NavRadio}" GroupName="Nav" Content="Мониторинг" IsChecked="True" Click="Navigate_Click" CommandParameter="0" Tag="M3,12 H7 L10,4 L14,20 L17,12 H21"/>
                         <RadioButton x:Name="NavServers" Style="{StaticResource NavRadio}" GroupName="Nav" Content="Серверы" Click="Navigate_Click" CommandParameter="1" Tag="M4,4 H20 V9 H4 Z M4,15 H20 V20 H4 Z M7,6.5 H7.01 M7,17.5 H7.01"/>
@@ -51,11 +48,19 @@
                         <RadioButton x:Name="NavSettings" Style="{StaticResource NavRadio}" GroupName="Nav" Content="Настройки" Click="Navigate_Click" CommandParameter="4" Tag="M4,21 V14 M4,10 V3 M12,21 V12 M12,8 V3 M20,21 V16 M20,12 V3 M1,14 H7 M9,8 H15 M17,16 H23"/>
                     </StackPanel>
 
-                    <!-- approved lower sidebar illustration -->
-                    <Grid Grid.Row="4" VerticalAlignment="Bottom" ClipToBounds="True">
-                        <Image Source="/Assets/Sidebar/beaver_scene.png" Stretch="UniformToFill" Width="252" Height="310" VerticalAlignment="Bottom" Opacity="0.96"/>
-                        <Rectangle VerticalAlignment="Top" Height="72">
+                    <!-- lower artwork: keep the noisy/reflection part outside the visible crop -->
+                    <Grid Grid.Row="4" VerticalAlignment="Bottom" ClipToBounds="True" Background="#101315" SnapsToDevicePixels="True">
+                        <Image Source="/Assets/Sidebar/beaver_scene.png"
+                               Stretch="UniformToFill"
+                               Width="252" Height="258"
+                               HorizontalAlignment="Center" VerticalAlignment="Top"
+                               RenderOptions.BitmapScalingMode="HighQuality"
+                               Opacity="0.96"/>
+                        <Rectangle VerticalAlignment="Top" Height="70">
                             <Rectangle.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF101315" Offset="0"/><GradientStop Color="#00101315" Offset="1"/></LinearGradientBrush></Rectangle.Fill>
+                        </Rectangle>
+                        <Rectangle VerticalAlignment="Bottom" Height="112">
+                            <Rectangle.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00101315" Offset="0"/><GradientStop Color="#F8101315" Offset="0.58"/><GradientStop Color="#FF101315" Offset="1"/></LinearGradientBrush></Rectangle.Fill>
                         </Rectangle>
                         <StackPanel VerticalAlignment="Bottom" Margin="29,0,0,18">
                             <TextBlock Text="БОЛЬШЕ" Foreground="#8B939C" FontSize="10" FontWeight="SemiBold"/>
@@ -66,7 +71,6 @@
                 </Grid>
             </Border>
 
-            <!-- custom title bar; no OS white top border -->
             <Border Grid.Column="1" Grid.Row="0" Background="#0D0E10" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                 <Grid>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" shell:WindowChrome.IsHitTestVisibleInChrome="True">
@@ -79,7 +83,6 @@
                 </Grid>
             </Border>
 
-            <!-- page host -->
             <TabControl x:Name="MainTabs" Grid.Column="1" Grid.Row="1" Background="Transparent" BorderThickness="0" SelectedIndex="0" SelectionChanged="MainTabs_SelectionChanged">
                 <TabControl.Template>
                     <ControlTemplate TargetType="TabControl"><Border Background="Transparent"><ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"/></Border></ControlTemplate>
