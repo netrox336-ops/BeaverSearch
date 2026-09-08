@@ -224,7 +224,10 @@ else {
     if ($vmCode -match 'A2sClient|GameMonitoringResolver|UseGameMonitoring') { Add-Issue 'Legacy A2S/GAMEMONITORING resolver is still referenced by MainViewModel.' }
     if ($vmCode -match 'forceRefresh\s*:\s*true') { Add-Issue 'MainViewModel bypasses source refresh caches.' }
     if ($vmCode -notmatch 'TimeSpan\.FromHours\(24\)') { Add-Issue '24h SteamID scan TTL marker is missing.' }
-    if ($vmCode -notmatch 'new\(8, 8\)') { Add-Issue 'Inventory scan concurrency gate is not 8.' }
+    if ($vmCode -notmatch '_scanGate\s*=\s*new\(4, 4\)') { Add-Issue 'Inventory scan concurrency gate is not 4.' }
+    if ($vmCode -notmatch 'CommunityServerBatchSize\s*=\s*10') { Add-Issue 'Community server batch size is not 10.' }
+    if ($vmCode -notmatch 'WaitForCurrentBatchScansAsync') { Add-Issue 'Sequential server-batch completion wait is missing.' }
+    if ($vmCode -notmatch 'Task\.Run\(\(\)\s*=>\s*loader\(ct\)') { Add-Issue 'Community source parsing is not explicitly off the WPF dispatcher.' }
 }
 if (Test-Path '.\src\BeaverSearch\Services\A2sClient.cs') { Add-Issue 'Legacy A2sClient.cs still exists in 0.4.1 source.' }
 if (Test-Path '.\src\BeaverSearch\Services\GameMonitoringResolver.cs') { Add-Issue 'Legacy GameMonitoringResolver.cs still exists in 0.4.1 source.' }
@@ -234,6 +237,7 @@ if ($allXaml -notmatch 'CybershokeLivePlayers') { Add-Issue 'Diagnostics CYBERSH
 if ($allXaml -notmatch 'YoomaPagesLoaded') { Add-Issue 'Diagnostics yooma page progress is missing.' }
 if ($allXaml -notmatch 'CybershokePagesLoaded') { Add-Issue 'Diagnostics CYBERSHOKE page progress is missing.' }
 $notes.Add('FixSteamID pipeline: yooma.su + CYBERSHOKE DOM/XHR/WebSocket -> exact SteamID checked') | Out-Null
+$notes.Add('Monitoring batch: 10 servers / sequential batch completion / source parsing off UI checked') | Out-Null
 
 # 8) Version/DPI/release support.
 $csproj = Get-Content '.\src\BeaverSearch\BeaverSearch.csproj' -Raw -Encoding UTF8
@@ -258,6 +262,7 @@ $result.Add('- C# async ref/out compile trap (CS1988): checked') | Out-Null
 $result.Add('- Application ICO directory bounds / CS7065 trap: checked') | Out-Null
 $result.Add('- MainTabs initial page: MonitorView checked') | Out-Null
 $result.Add('- FixSteamID yooma.su + CYBERSHOKE DOM/API/WebSocket pipeline: checked') | Out-Null
+$result.Add('- 10-server sequential batch / scan gate 4 / source parsing off UI: checked') | Out-Null
 $result.Add('- GitHub Actions workflows: forbidden/checked') | Out-Null
 $result.Add('- Version / PerMonitorV2 / release files: checked') | Out-Null
 $result.Add('') | Out-Null
