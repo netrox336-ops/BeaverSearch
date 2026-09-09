@@ -23,9 +23,6 @@ public sealed class InventoryValuationService
 
     public async Task<PlayerValuation> ValuePlayerAsync(string steamId64, string csFloatApiKey, CancellationToken ct)
     {
-        // MainViewModel may queue many players at once. Only four heavy valuation
-        // pipelines are allowed to run simultaneously so network/JSON work cannot
-        // saturate the machine and freeze the WPF dispatcher.
         await _playerValuationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -38,6 +35,18 @@ public sealed class InventoryValuationService
                 await cs.ConfigureAwait(false),
                 await dota.ConfigureAwait(false),
                 await rust.ConfigureAwait(false));
+
+            // A temporary Steam HTTP/rate-limit failure must never be stored as a
+            // successful 0 ₽ / private inventory for 24 hours.
+            var temporary = new[] { result.Cs2, result.Dota2, result.Rust }
+                .Where(x => x.TemporaryFailure)
+                .ToArray();
+            if (temporary.Length > 0)
+            {
+                var reason = string.Join(" | ", temporary
+                    .Select(x => $"{GameName(x.AppId)}: {x.Error ?? "temporary Steam inventory error"}"));
+                throw new HttpRequestException(reason);
+            }
 
             // A private/empty/non-marketable inventory may legitimately be 0 ₽.
             // A public inventory with Steam-marketable items but zero provider answers
@@ -57,7 +66,14 @@ public sealed class InventoryValuationService
     private async Task<GameValuation> ValueGameAsync(string steamId64, int appId, string csFloatApiKey, CancellationToken ct)
     {
         var inventory = await _inventory.GetInventoryAsync(steamId64, appId, ct).ConfigureAwait(false);
-        if (!inventory.Accessible) return new GameValuation(appId, 0, 0, false, 0);
+        if (!inventory.Accessible)
+        {
+            return new GameValuation(appId, 0, 0, false, 0)
+            {
+                TemporaryFailure = inventory.TransientFailure,
+                Error = inventory.Error
+            };
+        }
 
         var itemCount = 0;
         var marketableItems = 0;
@@ -72,8 +88,6 @@ public sealed class InventoryValuationService
             marketNames.Add(desc.MarketHashName.Trim());
         }
 
-        // Steam Community Market lookup happens only for marketable names that occur
-        // in this inventory. The provider deduplicates/cache-shares across all players.
         var prices = await _prices.GetPricesAsync(appId, marketNames, ct).ConfigureAwait(false);
         var pricingAvailable = marketNames.Count == 0 || prices.Count > 0;
         var lines = new List<(InventoryAsset Asset, InventoryDescription? Desc, decimal UnitPrice)>(inventory.Assets.Count);
@@ -110,7 +124,7 @@ public sealed class InventoryValuationService
                     if (index >= 0) lines[index] = (candidate.Asset, candidate.Desc, comparable.Value);
                 }
                 catch (OperationCanceledException) { throw; }
-                catch { /* Advanced valuation is best-effort; base Steam price remains valid. */ }
+                catch { /* Advanced valuation is best-effort; base market price remains valid. */ }
             }
         }
 
@@ -121,4 +135,12 @@ public sealed class InventoryValuationService
             PricingAvailable = pricingAvailable
         };
     }
+
+    private static string GameName(int appId) => appId switch
+    {
+        730 => "CS2",
+        570 => "Dota 2",
+        252490 => "Rust",
+        _ => appId.ToString()
+    };
 }
