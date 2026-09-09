@@ -5,7 +5,7 @@ namespace BeaverSearch.Services;
 
 public sealed class LocalStore
 {
-    private const int CurrentPriceEngineVersion = 3;
+    private const int CurrentPriceEngineVersion = 4;
     private readonly string _root;
     private readonly string _settingsPath;
     private readonly string _cachePath;
@@ -51,7 +51,8 @@ public sealed class LocalStore
         if (!hasVersionMarker || cache.PriceEngineVersion != CurrentPriceEngineVersion)
         {
             // Preserve exact SteamID/name discoveries, but force valuation to run again.
-            // Old v0.4.1 builds could store a successful 24h check with a false/partial total.
+            // Older builds could store a successful 24h check after Steam returned 403
+            // for count=5000, incorrectly treating a public inventory as 0 ₽/private.
             cache.SteamChecks.Clear();
             cache.PriceEngineVersion = CurrentPriceEngineVersion;
             await WriteAsync(_cachePath, cache).ConfigureAwait(false);
@@ -90,8 +91,6 @@ public sealed class LocalStore
         {
             while (true)
             {
-                // Collapse the burst produced when dozens of newly discovered players
-                // finish almost together into one physical JSON serialization/write.
                 await Task.Delay(550).ConfigureAwait(false);
 
                 CacheState? cache;
