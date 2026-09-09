@@ -26,32 +26,29 @@ public sealed class InventoryValuationService
         await _playerValuationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var cs = ValueGameAsync(steamId64, 730, csFloatApiKey, ct);
-            var dota = ValueGameAsync(steamId64, 570, string.Empty, ct);
-            var rust = ValueGameAsync(steamId64, 252490, string.Empty, ct);
-            await Task.WhenAll(cs, dota, rust).ConfigureAwait(false);
+            // Do NOT fan out CS2/Dota/Rust at once. Steam Community inventory is an
+            // IP-rate-limited endpoint; three simultaneous requests per player caused
+            // bursts of HTTP 403/429 and the old "CS2:null | Dota:null | Rust:null"
+            // errors. Query games sequentially and stop immediately on a transient
+            // Steam failure so two more requests cannot make the throttle worse.
+            var cs = await ValueGameAsync(steamId64, 730, csFloatApiKey, ct).ConfigureAwait(false);
+            ThrowIfTemporary(cs);
 
-            var result = new PlayerValuation(
-                await cs.ConfigureAwait(false),
-                await dota.ConfigureAwait(false),
-                await rust.ConfigureAwait(false));
+            var dota = await ValueGameAsync(steamId64, 570, string.Empty, ct).ConfigureAwait(false);
+            ThrowIfTemporary(dota);
 
-            // ProcessPlayerAsync writes the 24h cache only after this method succeeds.
-            // Therefore a transient Steam/rate-limit response must fail the valuation,
-            // not masquerade as a private 0 ₽ inventory.
-            var temporary = new[] { result.Cs2, result.Dota2, result.Rust }
-                .Where(x => x.TemporaryFailure)
-                .ToArray();
-            if (temporary.Length > 0)
-            {
-                var reason = string.Join(" | ", temporary.Select(x =>
-                    $"{GameName(x.AppId)}: {x.Error ?? "временная ошибка Steam inventory"}"));
-                throw new HttpRequestException(reason);
-            }
+            var rust = await ValueGameAsync(steamId64, 252490, string.Empty, ct).ConfigureAwait(false);
+            ThrowIfTemporary(rust);
 
+            var result = new PlayerValuation(cs, dota, rust);
             var games = new[] { result.Cs2, result.Dota2, result.Rust };
             if (games.Any(x => x.Accessible && x.MarketableItems > 0 && !x.PricingAvailable))
-                throw new HttpRequestException("Публичный inventory получен, но price provider не вернул цены для marketable-предметов; результат 0 ₽ не кэшируется.");
+            {
+                var affected = string.Join(", ", games
+                    .Where(x => x.Accessible && x.MarketableItems > 0 && !x.PricingAvailable)
+                    .Select(x => GameName(x.AppId)));
+                throw new HttpRequestException($"Price provider не вернул ни одной цены для marketable inventory: {affected}. Ложный 0 ₽ не кэшируется.");
+            }
 
             return result;
         }
@@ -63,13 +60,29 @@ public sealed class InventoryValuationService
 
     private async Task<GameValuation> ValueGameAsync(string steamId64, int appId, string csFloatApiKey, CancellationToken ct)
     {
-        var inventory = await _inventory.GetInventoryAsync(steamId64, appId, ct).ConfigureAwait(false);
+        SteamInventory inventory;
+        try
+        {
+            inventory = await _inventory.GetInventoryAsync(steamId64, appId, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            return new GameValuation(appId, 0, 0, false, 0)
+            {
+                TemporaryFailure = true,
+                Error = $"Steam inventory transport {ex.GetType().Name}: {ex.Message}"
+            };
+        }
+
         if (!inventory.Accessible)
         {
             return new GameValuation(appId, 0, 0, false, 0)
             {
                 TemporaryFailure = inventory.TransientFailure,
-                Error = inventory.Error
+                Error = string.IsNullOrWhiteSpace(inventory.Error)
+                    ? $"Steam inventory unavailable{(inventory.HttpStatusCode is int code ? $" (HTTP {code})" : string.Empty)}"
+                    : inventory.Error
             };
         }
 
@@ -86,7 +99,17 @@ public sealed class InventoryValuationService
             marketNames.Add(desc.MarketHashName.Trim());
         }
 
-        var prices = await _prices.GetPricesAsync(appId, marketNames, ct).ConfigureAwait(false);
+        IReadOnlyDictionary<string, decimal> prices;
+        try
+        {
+            prices = await _prices.GetPricesAsync(appId, marketNames, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            throw new HttpRequestException($"{GameName(appId)} price provider: {ex.Message}", ex);
+        }
+
         var pricingAvailable = marketNames.Count == 0 || prices.Count > 0;
         var lines = new List<(InventoryAsset Asset, InventoryDescription? Desc, decimal UnitPrice)>(inventory.Assets.Count);
         var unpriced = 0;
@@ -132,6 +155,13 @@ public sealed class InventoryValuationService
             MarketableItems = marketableItems,
             PricingAvailable = pricingAvailable
         };
+    }
+
+    private static void ThrowIfTemporary(GameValuation game)
+    {
+        if (!game.TemporaryFailure) return;
+        var reason = string.IsNullOrWhiteSpace(game.Error) ? "временная ошибка Steam inventory без деталей" : game.Error.Trim();
+        throw new HttpRequestException($"{GameName(game.AppId)}: {reason}");
     }
 
     private static string GameName(int appId) => appId switch
