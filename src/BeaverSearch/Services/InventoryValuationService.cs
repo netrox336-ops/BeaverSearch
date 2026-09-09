@@ -31,14 +31,29 @@ public sealed class InventoryValuationService
             var rust = ValueGameAsync(steamId64, 252490, string.Empty, ct);
             await Task.WhenAll(cs, dota, rust).ConfigureAwait(false);
 
-            // Return partial data. A temporary problem in Dota/Rust must not hide a
-            // perfectly valid CS2 valuation. MainViewModel decides whether the 24h
-            // cache is safe to write after looking at per-game TemporaryFailure and
-            // PricingAvailable flags.
-            return new PlayerValuation(
+            var result = new PlayerValuation(
                 await cs.ConfigureAwait(false),
                 await dota.ConfigureAwait(false),
                 await rust.ConfigureAwait(false));
+
+            // ProcessPlayerAsync writes the 24h cache only after this method succeeds.
+            // Therefore a transient Steam/rate-limit response must fail the valuation,
+            // not masquerade as a private 0 ₽ inventory.
+            var temporary = new[] { result.Cs2, result.Dota2, result.Rust }
+                .Where(x => x.TemporaryFailure)
+                .ToArray();
+            if (temporary.Length > 0)
+            {
+                var reason = string.Join(" | ", temporary.Select(x =>
+                    $"{GameName(x.AppId)}: {x.Error ?? "временная ошибка Steam inventory"}"));
+                throw new HttpRequestException(reason);
+            }
+
+            var games = new[] { result.Cs2, result.Dota2, result.Rust };
+            if (games.Any(x => x.Accessible && x.MarketableItems > 0 && !x.PricingAvailable))
+                throw new HttpRequestException("Публичный inventory получен, но price provider не вернул цены для marketable-предметов; результат 0 ₽ не кэшируется.");
+
+            return result;
         }
         finally
         {
@@ -118,4 +133,12 @@ public sealed class InventoryValuationService
             PricingAvailable = pricingAvailable
         };
     }
+
+    private static string GameName(int appId) => appId switch
+    {
+        730 => "CS2",
+        570 => "Dota 2",
+        252490 => "Rust",
+        _ => appId.ToString()
+    };
 }
