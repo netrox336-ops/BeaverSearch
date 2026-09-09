@@ -2,24 +2,32 @@
 
 Дата: 2026-09-09.
 
+## Inventory hotfix — `CS2: null | Dota 2: null | Rust: null`
+
+- Исправлен новый runtime-дефект, обнаруженный на реальном monitoring batch: Steam мог отвечать `403/429` с пустым либо буквально `null` body, а BeaverSearch выводил бесполезное `CS2: null | Dota 2: null | Rust: null`.
+- `null/false/{}/[]` больше не считаются текстом ошибки. В журнал теперь попадает реальный HTTP status и понятная причина, например `Steam inventory HTTP 403 Forbidden: empty/null body; ... rate limit/anti-bot`.
+- Steam inventory requests глобально сериализованы: одновременно выполняется только 1 запрос к Community inventory endpoint.
+- Базовый интервал между inventory requests увеличен до 2.5 секунды. После `403/429` включается адаптивный cooldown 15/30/60/90 секунд и throttled spacing 5 секунд, чтобы BeaverSearch сам не продлевал блокировку Steam постоянными повторными запросами.
+- Размер страницы уменьшен до `count=1000`; пагинация через `more_items + last_assetid + start_assetid` сохранена.
+- Перед первой inventory-проверкой создаётся собственная анонимная Steam Community session/cookie jar. Пользовательские cookies Edge/Chrome не читаются и авторизация Steam не требуется.
+- CS2 / Dota 2 / Rust больше не запрашиваются одновременно для одного игрока. Игры проверяются последовательно; при временной ошибке CS2 две лишние inventory-проверки не запускаются. Это резко снижает burst-нагрузку и сразу показывает, на каком запросе Steam начал throttle.
+- Transport timeout/invalid JSON/body read errors теперь также получают конкретный текст и никогда не кэшируются как успешный `0 ₽`.
+
 ## Inventory/valuation hotfix — public inventory falsely shown as 0 ₽
 
 - Исправлена подтверждённая ошибка ручной проверки: публичный CS2 inventory мог отображаться как `0 ₽ (закрыт/недоступен)`.
-- Причина: BeaverSearch запрашивал `steamcommunity.com/inventory/<SteamID>/730/2` с `count=5000`. После ужесточения Steam Community такой размер страницы может возвращать HTTP 403 даже для публичного inventory.
-- Размер Steam inventory page уменьшен до `2000`, сохранена полноценная пагинация через `more_items + last_assetid + start_assetid`.
-- Одновременных Steam inventory HTTP-запросов теперь максимум 2; между запросами есть pacing 450 мс. Это снижает вероятность временного IP throttle во время массового server batch.
 - `403/429/5xx` больше не превращаются автоматически в «private inventory = 0 ₽». Steam error body анализируется отдельно; временный HTTP/rate-limit сбой помечается как transient и не может попасть в 24h successful cache.
 - Явный private/not-available ответ Steam по-прежнему корректно считается закрытым inventory.
-- Парсер `success`, `marketable`, `more_items` теперь принимает bool/number/string формы (`true`, `1`, `"1"`), чтобы изменение JSON-типа не превращало marketable skins в нулевую оценку.
-- `market_hash_name` читается с fallback на `market_name/name`; assets/descriptions продолжают связываться через `classid + instanceid`.
-- `PriceEngineVersion` поднят до `4`: старые `SteamChecks`, которые могли быть записаны как ложный `0 ₽`, сбрасываются автоматически, а уже найденные SteamID/name mappings сохраняются.
+- Парсер `success`, `marketable`, `more_items` принимает bool/number/string формы (`true`, `1`, `"1"`), чтобы изменение JSON-типа не превращало marketable skins в нулевую оценку.
+- `market_hash_name` читается с fallback на `market_name/name`; assets/descriptions связываются через `classid + instanceid`.
+- `PriceEngineVersion = 4`: старые `SteamChecks`, которые могли быть записаны как ложный `0 ₽`, сбрасываются автоматически, а найденные SteamID/name mappings сохраняются.
 - Если Steam inventory/price provider временно не ответил, valuation завершается ошибкой и повторяется позже вместо записи ложного `0 ₽` на 24 часа.
 
 ## Performance / sequential monitoring batches
 
 - Мониторинг работает последовательными пакетами по 10 серверов: 10 серверов → игроки/SteamID → inventory/price → ожидание текущих scan-задач → следующая десятка.
 - UI больше не материализует тысячи dynamic server rows; одновременно отображается текущий рабочий batch.
-- Тяжёлых player valuation одновременно максимум 4.
+- Тяжёлых player valuation одновременно максимум 4, при этом сам Steam inventory endpoint защищён отдельным глобальным gate=1.
 - Browser probe ограничен одним Chromium process, использует compact DOM fragments, BelowNormal priority и 75s cache.
 - JSON/HTML source parsing выполняется вне WPF dispatcher; UI metrics throttled.
 - Сохранение `cache.json` дебаунсится, чтобы массовое завершение игроков не вызывало серию полных JSON write подряд.
