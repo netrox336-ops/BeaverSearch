@@ -31,31 +31,14 @@ public sealed class InventoryValuationService
             var rust = ValueGameAsync(steamId64, 252490, string.Empty, ct);
             await Task.WhenAll(cs, dota, rust).ConfigureAwait(false);
 
-            var result = new PlayerValuation(
+            // Return partial data. A temporary problem in Dota/Rust must not hide a
+            // perfectly valid CS2 valuation. MainViewModel decides whether the 24h
+            // cache is safe to write after looking at per-game TemporaryFailure and
+            // PricingAvailable flags.
+            return new PlayerValuation(
                 await cs.ConfigureAwait(false),
                 await dota.ConfigureAwait(false),
                 await rust.ConfigureAwait(false));
-
-            // A temporary Steam HTTP/rate-limit failure must never be stored as a
-            // successful 0 ₽ / private inventory for 24 hours.
-            var temporary = new[] { result.Cs2, result.Dota2, result.Rust }
-                .Where(x => x.TemporaryFailure)
-                .ToArray();
-            if (temporary.Length > 0)
-            {
-                var reason = string.Join(" | ", temporary
-                    .Select(x => $"{GameName(x.AppId)}: {x.Error ?? "temporary Steam inventory error"}"));
-                throw new HttpRequestException(reason);
-            }
-
-            // A private/empty/non-marketable inventory may legitimately be 0 ₽.
-            // A public inventory with Steam-marketable items but zero provider answers
-            // is different: never cache that as a successful 0 ₽ valuation for 24h.
-            var games = new[] { result.Cs2, result.Dota2, result.Rust };
-            if (games.Any(x => x.Accessible && x.MarketableItems > 0 && !x.PricingAvailable))
-                throw new HttpRequestException("Steam Market не вернул цены для marketable-предметов; оценка не кэшируется и будет повторена.");
-
-            return result;
         }
         finally
         {
@@ -135,12 +118,4 @@ public sealed class InventoryValuationService
             PricingAvailable = pricingAvailable
         };
     }
-
-    private static string GameName(int appId) => appId switch
-    {
-        730 => "CS2",
-        570 => "Dota 2",
-        252490 => "Rust",
-        _ => appId.ToString()
-    };
 }
