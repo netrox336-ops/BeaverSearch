@@ -15,7 +15,7 @@ public sealed class MainViewModel : ObservableObject
 {
     private const int CommunityServerBatchSize = 10;
     private const int MaxPlayersPerServerBatch = 64;
-    private const int MaxScheduledScansPerBatch = 80;
+    private const int MaxScheduledScansPerBatch = 40;
     private static readonly TimeSpan SteamCheckTtl = TimeSpan.FromHours(24);
     private static readonly TimeSpan UnresolvedRetryDelay = TimeSpan.FromSeconds(45);
 
@@ -145,7 +145,7 @@ public sealed class MainViewModel : ObservableObject
     public string CybershokeProfileHealthText => !IsMonitoring ? "Ожидание" : CybershokeProfilePlayers > 0 ? "SteamID получены" : "Ждём live DOM";
     public int CommunityLivePlayers => YoomaLivePlayers + CybershokeLivePlayers;
     public int CommunityProfilePlayers => YoomaProfilePlayers + CybershokeProfilePlayers;
-    public string PriceHealthText => "Bulk cache + Steam fallback";
+    public string PriceHealthText => "Multi-source bulk + Steam fallback";
     public string InventoryHealthText => ProcessingCount > 0 ? $"Обработка: {ProcessingCount}" : IsMonitoring ? "Работает" : "Ожидание";
     public string CacheHealthText => "В норме";
     public string DataFolder => _store.DataFolder;
@@ -170,9 +170,9 @@ public sealed class MainViewModel : ObservableObject
         _cache = await _store.LoadCacheAsync();
         Servers.Clear();
         Log("BeaverSearch v0.4.1 FixSteamID запущен.");
-        Log("Мониторинг работает пакетами по 10 серверов: пакет полностью передаётся Inventory Scanner, затем выбираются следующие 10.");
+        Log("Мониторинг: 10 серверов → до 40 новых SteamID → полное завершение текущих проверок → следующая десятка. Перекрытия пакетов нет.");
         Log("Источники: yooma.su + CYBERSHOKE; SteamID64 берётся только из live DOM/API/WebSocket, без угадывания по нику.");
-        Log("Цены: lazy bulk RUB catalog + bounded Steam Market fallback. Старые ложные 0 ₽ пересканируются автоматически.");
+        Log("Цены: CS2/Dota bulk feeds + Skinport/Steam Market fallback. Ошибка одного price source больше не обнуляет игрока.");
         RefreshMetrics(force: true);
     }
 
@@ -293,7 +293,7 @@ public sealed class MainViewModel : ObservableObject
         IsMonitoring = true;
         StatusLine = "Подготовка первого пакета из 10 серверов...";
         Log("Мониторинг запущен: пакет 10 серверов → игроки → SteamID64 → Inventory/Price → следующий пакет.");
-        Log("Тяжёлые проверки ограничены 4 игроками одновременно; UI больше не должен обрабатывать тысячи server rows.");
+        Log("Следующий пакет не стартует, пока текущие inventory-задачи реально не завершились; фоновой очереди из старых пакетов больше нет.");
         _monitorTask = MonitorLoopAsync(_monitorCts.Token);
     }
 
@@ -413,9 +413,6 @@ public sealed class MainViewModel : ObservableObject
         ClearDynamicServerRows();
         LivePlayers.Clear();
 
-        // Apply one selected candidate at a time. This preserves all key/address aliases
-        // for that server and prevents player groups from being attached to a sibling
-        // candidate from the same source batch.
         foreach (var candidate in selected)
         {
             var players = candidate.Players
@@ -434,7 +431,7 @@ public sealed class MainViewModel : ObservableObject
 
         var playersInBatch = selected.Sum(x => Math.Min(MaxPlayersPerServerBatch, x.Players.Count(p => IsSteamId64(p.SteamId64))));
         StatusLine = $"Пакет #{_serverBatchNumber}: {selected.Count} серверов / {playersInBatch} игроков — проверка...";
-        Log($"Пакет #{_serverBatchNumber}: {selected.Count} серверов из {useful.Count}, точных SteamID в пакете: {playersInBatch}. Ждём завершения проверок перед следующим пакетом.");
+        Log($"Пакет #{_serverBatchNumber}: {selected.Count} серверов из {useful.Count}, точных SteamID в пакете: {playersInBatch}, новых проверок максимум {MaxScheduledScansPerBatch}. Ждём полного завершения пакета.");
         RefreshMetrics(force: true);
 
         await WaitForCurrentBatchScansAsync(ct);
@@ -655,7 +652,7 @@ public sealed class MainViewModel : ObservableObject
                 _scanBudgetRemaining--;
                 ScheduleScan(server, p.Name, knownSteamId, ct);
             }
-            else if (shouldScan) SetLiveStatus(server.Address, p.Name, "Отложен до следующего пакета");
+            else if (shouldScan) SetLiveStatus(server.Address, p.Name, "Отложен до следующего круга");
         }
         foreach (var left in previous.Where(x => !nowNames.Contains(x)))
         {
@@ -679,8 +676,7 @@ public sealed class MainViewModel : ObservableObject
     {
         var tasks = _playerTasks.Values.ToArray();
         if (tasks.Length == 0) return;
-        try { await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(90), ct); }
-        catch (TimeoutException) { Log("Пакет: часть inventory-проверок превысила 90с; следующий пакет продолжит работу."); }
+        await Task.WhenAll(tasks).WaitAsync(ct);
     }
 
     private async Task ScanSafeAsync(ServerEntry server, string nickname, string? knownSteamId, CancellationToken monitorCt)
@@ -755,15 +751,22 @@ public sealed class MainViewModel : ObservableObject
                 var profile = await profileTask;
                 var valuation = await valuationTask;
 
-                _cache.SteamChecks[steamId!] = new SteamCheckCache { LastCheckedUtc = DateTime.UtcNow };
-                await _store.SaveCacheAsync(_cache);
+                if (!valuation.HasTemporaryFailures)
+                {
+                    _cache.SteamChecks[steamId!] = new SteamCheckCache { LastCheckedUtc = DateTime.UtcNow };
+                    await _store.SaveCacheAsync(_cache);
+                }
+
                 Interlocked.Increment(ref _checkedSession);
                 var matched = MatchGames(valuation);
                 var inaccessible = new List<string>();
-                if (!valuation.Cs2.Accessible) inaccessible.Add("CS2");
-                if (!valuation.Dota2.Accessible) inaccessible.Add("Dota2");
-                if (!valuation.Rust.Accessible) inaccessible.Add("Rust");
-                var status = inaccessible.Count == 0 ? "OK" : "Закрыто: " + string.Join(", ", inaccessible);
+                if (!valuation.Cs2.Accessible && !valuation.Cs2.TemporaryFailure) inaccessible.Add("CS2");
+                if (!valuation.Dota2.Accessible && !valuation.Dota2.TemporaryFailure) inaccessible.Add("Dota2");
+                if (!valuation.Rust.Accessible && !valuation.Rust.TemporaryFailure) inaccessible.Add("Rust");
+                var temporary = TemporarySummary(valuation);
+                var status = temporary.Length > 0
+                    ? "Частично: " + temporary
+                    : inaccessible.Count == 0 ? "OK" : "Закрыто: " + string.Join(", ", inaccessible);
 
                 if (matched.Count > 0)
                 {
@@ -777,9 +780,14 @@ public sealed class MainViewModel : ObservableObject
                     Ui(() =>
                     {
                         UpsertResultCore(incoming);
-                        SetLiveStatusCore(server.Address, nickname, "MATCH ✓");
+                        SetLiveStatusCore(server.Address, nickname, valuation.HasTemporaryFailures ? "MATCH ✓ · partial" : "MATCH ✓");
                     });
-                    Log($"MATCH: {profile.Nickname} ({steamId}) — {valuation.Total:N0} ₽ [{string.Join(", ", matched)}]");
+                    Log($"MATCH: {profile.Nickname} ({steamId}) — {valuation.Total:N0} ₽ [{string.Join(", ", matched)}]{(valuation.HasTemporaryFailures ? " · partial, retry later" : string.Empty)}");
+                }
+                else if (valuation.HasTemporaryFailures)
+                {
+                    SetLiveStatus(server.Address, nickname, "Временная ошибка · повтор позже");
+                    Log($"{nickname} ({steamId}): partial valuation — {temporary}");
                 }
                 else
                 {
@@ -795,6 +803,22 @@ public sealed class MainViewModel : ObservableObject
             }
         }
         finally { steamGate.Release(); }
+    }
+
+    private static string TemporarySummary(PlayerValuation value)
+    {
+        var parts = new List<string>();
+        if (value.Cs2.TemporaryFailure) parts.Add("CS2: " + ShortError(value.Cs2.Error));
+        if (value.Dota2.TemporaryFailure) parts.Add("Dota2: " + ShortError(value.Dota2.Error));
+        if (value.Rust.TemporaryFailure) parts.Add("Rust: " + ShortError(value.Rust.Error));
+        return string.Join(" | ", parts);
+    }
+
+    private static string ShortError(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error)) return "temporary failure";
+        var text = error.Trim();
+        return text.Length <= 120 ? text : text[..120] + "…";
     }
 
     private void MarkUnresolved(string serverAddress, string nickname, string nameKey, bool log)
@@ -897,14 +921,15 @@ public sealed class MainViewModel : ObservableObject
             var p = await profileTask;
             var v = await valueTask;
             var match = MatchGames(v);
-            ManualResultText = $"{p.Nickname}\nCS2: {v.Cs2.ValueRub:N0} ₽ ({InventoryState(v.Cs2)})\nDota 2: {v.Dota2.ValueRub:N0} ₽ ({InventoryState(v.Dota2)})\nRust: {v.Rust.ValueRub:N0} ₽ ({InventoryState(v.Rust)})\nИтого: {v.Total:N0} ₽\nФильтр: {(match.Count > 0 ? string.Join(", ", match) : "не подходит")}";
+            ManualResultText = $"{p.Nickname}\nCS2: {v.Cs2.ValueRub:N0} ₽ ({InventoryState(v.Cs2)})\nDota 2: {v.Dota2.ValueRub:N0} ₽ ({InventoryState(v.Dota2)})\nRust: {v.Rust.ValueRub:N0} ₽ ({InventoryState(v.Rust)})\nИтого: {v.Total:N0} ₽\nФильтр: {(match.Count > 0 ? string.Join(", ", match) : "не подходит")}{(v.HasTemporaryFailures ? "\nСтатус: частичная проверка, временные ошибки будут повторены" : string.Empty)}";
         }
         catch (Exception ex) { ManualResultText = "Ошибка проверки: " + ex.Message; }
     }
 
     private static string InventoryState(GameValuation value)
     {
-        if (!value.Accessible) return "закрыт/недоступен";
+        if (value.TemporaryFailure) return "временно недоступно: " + ShortError(value.Error);
+        if (!value.Accessible) return string.IsNullOrWhiteSpace(value.Error) ? "закрыт/недоступен" : "закрыт/недоступен: " + ShortError(value.Error);
         var pricing = value.PricingAvailable ? "цены OK" : "цены недоступны";
         return $"{value.ItemCount} items, marketable {value.MarketableItems}, {value.UnpricedItems} без цены, {pricing}";
     }
