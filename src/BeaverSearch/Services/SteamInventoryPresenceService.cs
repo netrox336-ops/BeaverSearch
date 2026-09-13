@@ -14,6 +14,7 @@ public sealed class SteamInventoryPresenceService
 {
     private static readonly TimeSpan PositiveTtl = TimeSpan.FromMinutes(20);
     private static readonly TimeSpan FailureTtl = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan RequestSpacing = TimeSpan.FromSeconds(6);
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly HttpClient _http;
@@ -120,7 +121,7 @@ public sealed class SteamInventoryPresenceService
             var now = DateTime.UtcNow;
             delay = _nextRequestUtc > now ? _nextRequestUtc - now : TimeSpan.Zero;
             var baseTime = _nextRequestUtc > now ? _nextRequestUtc : now;
-            _nextRequestUtc = baseTime + TimeSpan.FromMilliseconds(1200);
+            _nextRequestUtc = baseTime + RequestSpacing;
         }
         if (delay > TimeSpan.Zero)
             await Task.Delay(delay, ct).ConfigureAwait(false);
