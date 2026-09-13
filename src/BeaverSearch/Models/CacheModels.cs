@@ -4,10 +4,10 @@ namespace BeaverSearch.Models;
 
 public sealed class CacheState
 {
-    // Increment when valuation semantics change in a way that makes old 24h checks
-    // unsafe to reuse. v5 adds modern+legacy Steam inventory fallback and resilient
-    // multi-source pricing; old false-zero/failed checks must be rescanned.
-    public int PriceEngineVersion { get; set; } = 5;
+    // v6 changes Steam inventory semantics again: 401/null app inventories are empty,
+    // a profile-page presence precheck skips absent games, and request storms/legacy
+    // retries were removed. Re-evaluate every previously successful 24h valuation once.
+    public int PriceEngineVersion { get; set; } = 6;
 
     public ConcurrentDictionary<string, SteamCheckCache> SteamChecks { get; set; } = new(StringComparer.Ordinal);
     public ConcurrentDictionary<string, NameResolveCache> NameResolves { get; set; } = new(StringComparer.OrdinalIgnoreCase);
