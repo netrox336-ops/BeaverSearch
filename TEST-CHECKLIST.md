@@ -6,102 +6,74 @@
 - [ ] STATIC-PREFLIGHT = PASS.
 - [ ] HOTFIX-PREFLIGHT = PASS.
 - [ ] `dotnet build` = 0 errors.
-- [ ] Splash проходит `yooma + CYBER → SteamID → Inventory → Price Engine`.
 - [ ] MainWindow открывается без XamlParseException.
 
-## yooma.su
+## Source resolver
 
-- [ ] Monitoring запускается без ручного IP.
-- [ ] Diagnostics показывает yooma HTTP/render pages.
-- [ ] При SPA-shell включается Edge/Chrome DevTools probe.
-- [ ] `.server.loading` не приводит к вечному `Ожидание`.
-- [ ] В `source-probe.log` появляется `cards/loading/clicks/identities/resources/replayJson/networkJson/wsFrames/liteChars`.
-- [ ] `/card/<17-digit SteamID64>` распознаётся как подтверждённый SteamID64.
-- [ ] JSON из XHR/fetch/DevTools Network response проходит parser.
-- [ ] Steam AccountID/Steam2/Steam3 корректно нормализуются в SteamID64.
-- [ ] Ник не используется для поиска Steam-профиля.
+- [ ] yooma.su и CYBERSHOKE возвращают exact SteamID64 из DOM/API/WebSocket, без поиска по нику.
+- [ ] `/card/<SteamID64>` / `/profile/<SteamID64>` / explicit steam-account поля распознаются.
+- [ ] CYBERSHOKE DM roster даёт SteamID64 в player stream.
+- [ ] Один SteamID, найденный несколькими источниками, не запускает duplicate valuation одновременно.
 
-## CYBERSHOKE
+## Monitoring batch / anti-freeze
 
-- [ ] Mode/server cards появляются в Servers.
-- [ ] Player DOM/state с Steam identity превращается в SteamID64.
-- [ ] XHR/fetch response body считывается через DevTools `Network.getResponseBody`.
-- [ ] Текстовые WebSocket / Socket.IO frames с player identity попадают в parser stream.
-- [ ] Один SteamID из CYBERSHOKE и yooma.su не запускает два inventory scans.
+- [ ] В UI одновременно находится текущая десятка community servers, а не 1000+ server rows.
+- [ ] `CommunityServerBatchSize = 10`.
+- [ ] Один batch планирует максимум 40 новых SteamID checks.
+- [ ] Следующий batch НЕ начинается через фиксированный timeout: программа ждёт полного завершения текущих player tasks.
+- [ ] Старые inventory tasks не продолжают копиться за следующими server batches.
+- [ ] Player valuation concurrency максимум 4.
+- [ ] Chromium probe максимум 1, cache 75 секунд, compact DOM, BelowNormal priority.
+- [ ] UI остаётся отзывчивым во время source refresh / inventory / pricing.
+- [ ] Stop Monitoring отменяет текущую работу и не оставляет бесконечную очередь.
 
-## Monitoring batches / anti-freeze
+## Steam inventory — mandatory
 
-- [ ] Одновременно отображается текущий пакет примерно из 10 community servers, а не тысячи строк.
-- [ ] Следующая десятка выбирается после текущего batch workflow.
-- [ ] Тяжёлых player valuations одновременно максимум 4.
-- [ ] Одновременно работает максимум 1 headless Chromium probe.
-- [ ] Успешный browser snapshot кэшируется 75 секунд.
-- [ ] Browser child process имеет best-effort `BelowNormal` priority.
-- [ ] Parser получает compact server/player fragments, а не полный multi-megabyte DOM.
-- [ ] Временный browser profile создаётся отдельно; пользовательский browser profile/cookies не используются.
-- [ ] Во время monitoring tick окно продолжает перемещаться/скроллиться без заметного freeze.
-- [ ] Stop Monitoring отменяет browser/inventory work и UI не зависает.
+- [ ] Modern endpoint: `/inventory/<SteamID>/<appid>/2?count=1000`.
+- [ ] Legacy fallback: `/profiles/<SteamID>/inventory/json/<appid>/2`.
+- [ ] Перед legacy fallback выполняется anonymous profile inventory prime; пользовательские Edge/Chrome/Steam cookies не читаются.
+- [ ] Steam inventory requests глобально сериализованы (`gate=1`).
+- [ ] Normal spacing около 3 секунд, после 403/429 включается увеличенный cooldown/spacing.
+- [ ] Modern schema `assets/descriptions` связывается по `classid + instanceid`.
+- [ ] Legacy schema `rgInventory/rgDescriptions` связывается по `classid + instanceid`.
+- [ ] Modern pagination `more_items + last_assetid/start_assetid` работает.
+- [ ] Legacy pagination `more + more_start/start` работает.
+- [ ] `success`, `marketable`, pagination flags принимают bool/number/string формы.
+- [ ] Literal `null`, пустой body, 403/429, timeout, invalid JSON показываются как temporary failure с реальной причиной, а не как private `0 ₽`.
+- [ ] Явно закрытый/private inventory корректно остаётся inaccessible.
 
-## Steam Community inventory
+## Pricing — mandatory
 
-- [ ] Steam inventory URL использует `count=1000` и context `2`.
-- [ ] Одновременно выполняется максимум 1 Steam inventory HTTP request.
-- [ ] Между обычными inventory requests выдерживается минимум ~2.5 секунды.
-- [ ] После `403/429` включается adaptive cooldown и запросы не продолжают спамить Steam.
-- [ ] Перед первым inventory request создаётся собственная anonymous Steam Community cookie/session jar; пользовательские browser cookies не читаются.
-- [ ] CS2 / Dota 2 / Rust для одного игрока запрашиваются последовательно, а не fan-out одновременно.
-- [ ] `403/429/5xx` не превращаются в `закрыт/недоступен = 0 ₽`, если Steam явно не сообщил private/not available.
-- [ ] Пустой или literal `null` body при HTTP 403 отображается как конкретный HTTP/rate-limit error, а не `CS2: null`.
-- [ ] Timeout/transport/invalid JSON содержит реальный текст ошибки и не записывается в 24h successful cache.
-- [ ] Пагинация `more_items + last_assetid + start_assetid` собирает inventory больше одной страницы.
-- [ ] `success`, `marketable`, `more_items` принимают bool/number/string формы.
-- [ ] `market_hash_name` читается с fallback `market_name/name`.
+- [ ] CS2 primary bulk source — public SkinCash feed; USD конвертируется в RUB через CBR.
+- [ ] Dota primary bulk source — public market.dota2.net RUB feed.
+- [ ] Skinport используется как secondary source и получает `Accept-Encoding: br`.
+- [ ] Ошибка/403 одного bulk source не завершает весь player valuation исключением.
+- [ ] Отсутствующие `market_hash_name` ограниченно добираются Steam Community Market.
+- [ ] Steam Market fallback выполняется по одному запросу с pacing/cache, а не массовым Parallel.ForEach.
+- [ ] Если ни один price source не дал ни одной цены для непустого marketable inventory, игра помечается temporary failure, а не `0 ₽` success.
+- [ ] Common `market_hash_name` повторно используются из price cache.
 
-## Inventory valuation / pricing
+## Partial valuation / Results — mandatory
 
-- [ ] Confirmed SteamID сразу уходит в profile/inventory pipeline.
-- [ ] Публичный CS2 inventory с marketable-предметами получает ненулевую RUB стоимость, если price provider знает эти предметы.
-- [ ] Dota 2 / Rust обрабатываются аналогично при доступности inventory/price.
-- [ ] Для массовых проверок используется lazy bulk RUB catalog; отсутствующие позиции ограниченно добираются Steam Community Market по `market_hash_name`.
-- [ ] Публичный непустой inventory с marketable-предметами и временно нулевым ответом price provider НЕ записывается как успешные `0 ₽` на 24 часа.
-- [ ] Реально пустой/закрытый/non-marketable inventory может корректно иметь `0 ₽`.
-- [ ] `PriceEngineVersion: 4`; старые ложные `SteamChecks` после миграции не блокируют повторную оценку.
-- [ ] Повторный успешно оценённый SteamID <24h не запускает новый scan.
+- [ ] Успешный CS2 результат НЕ теряется, если Dota/Rust позже получили temporary Steam failure.
+- [ ] Если CS2 стоимость входит в заданный диапазон, такой игрок появляется в Results как `MATCH`, даже при partial Dota/Rust.
+- [ ] Partial result НЕ записывается в 24h successful SteamChecks и будет повторён позже.
+- [ ] Полностью успешный SteamID записывается в 24h cache и не пересканируется до TTL.
+- [ ] Реально пустой/non-marketable inventory может корректно иметь 0 ₽.
+- [ ] `PriceEngineVersion = 5`; после обновления старые `SteamChecks` очищаются автоматически, NameResolves/SteamID сохраняются.
 
-## Manual check — обязательный regression test
+## Manual regression test
 
-- [ ] С Monitoring OFF проверить `76561198316679969`.
-- [ ] Если Steam не throttled, CS2 определяется как доступный и показывает количество items/marketable вместо `закрыт/недоступен`.
-- [ ] Если Steam throttled, UI показывает точный `HTTP 403/429` и причину; `null` в тексте ошибки отсутствует.
-- [ ] После успешного inventory fetch стоимость CS2 больше 0 ₽ при наличии marketable skins с известной ценой.
-- [ ] При фильтре CS2 `1..30000` подходящая рассчитанная стоимость даёт `Фильтр: CS2`.
+- [ ] С Monitoring OFF проверить известный SteamID с публичным CS2 inventory.
+- [ ] CS2 показывает `items / marketable / без цены / цены OK`, а не `закрыт/недоступен`, если inventory получен.
+- [ ] При временном Steam throttle отображается конкретная modern/legacy причина, а не `null`.
+- [ ] При наличии известных marketable skins CS2 value > 0 ₽.
+- [ ] При фильтре CS2 `1..30000` подходящий результат даёт `Фильтр: CS2`.
 
-## Cache / массовый scan
+## Cache / repository / GUI
 
-- [ ] При одновременном завершении игроков `cache.json` не сериализуется физически после каждого игрока; записи объединяются debounce-окном ~550ms.
-- [ ] После debounce в `cache.json` присутствуют последние `NameResolves`, `SteamChecks` и `PriceEngineVersion: 4`.
-- [ ] Завершение приложения не оставляет повреждённый `.tmp`/cache.
-
-## Filters
-
-- [ ] `min/max` редактируются и диапазон используется сразу.
-- [ ] При CS2 filter `1..30000` игрок с рассчитанной CS2 стоимостью в этом диапазоне попадает в Results.
-- [ ] Игрок дороже max не создаёт ложный match.
-- [ ] Игрок со стоимостью ниже min не создаёт ложный match.
-- [ ] `yooma.su live players`, `CYBERSHOKE live players`, `SteamID confirmed`, `Inventory processing` обновляются.
-- [ ] После Monitoring OFF live counters = 0.
-
-## GUI / DPI
-
-- [ ] 100%, 125%, 150% Windows DPI.
-- [ ] Нет обрезанных нижних элементов.
+- [ ] `cache.json` сохраняется debounce-окном и содержит `PriceEngineVersion: 5`.
 - [ ] Нижний sidebar background не растянут/не повреждён.
-- [ ] Application icon использует beaver branding.
-- [ ] DataGrid selection остаётся тёмным.
-- [ ] Hover / pressed / focus состояния согласованы.
-
-## Packaging / repository
-
-- [ ] CHANGELOG / TEST-CHECKLIST соответствуют текущему hotfix.
-- [ ] Нет `bin/`, `obj/`, `.vs/`, `.tmp`.
-- [ ] В репозитории отсутствует `.github/workflows` — CI/Actions намеренно не используется.
+- [ ] Application icon — BeaverSearch/beaver branding.
+- [ ] Нет `bin/`, `obj/`, `.vs/`, `.tmp` в репозитории.
+- [ ] `.github/workflows` отсутствует; GitHub Actions намеренно не используется.
