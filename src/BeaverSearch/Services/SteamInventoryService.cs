@@ -7,12 +7,12 @@ namespace BeaverSearch.Services;
 
 public sealed class SteamInventoryService
 {
-    // Steam Community inventory is heavily rate-limited by IP. Keep both page size and
-    // request rate conservative: correctness is more important than flooding Steam and
-    // turning every public inventory into HTTP 403/429.
+    // Steam Community inventory is heavily rate-limited by IP. Use one global request
+    // lane and conservative pacing. When the modern endpoint is temporarily rejected,
+    // fall back to the older profile inventory JSON route instead of immediately failing.
     private const int PageSize = 1000;
-    private static readonly TimeSpan NormalSpacing = TimeSpan.FromMilliseconds(2500);
-    private static readonly TimeSpan ThrottledSpacing = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan NormalSpacing = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan ThrottledSpacing = TimeSpan.FromSeconds(6);
 
     private readonly HttpClient _http;
     private readonly SemaphoreSlim _inventoryRequestGate = new(1, 1);
@@ -25,9 +25,6 @@ public sealed class SteamInventoryService
 
     public SteamInventoryService()
     {
-        // Use a private in-process anonymous cookie jar. We never read the user's browser
-        // profile/cookies, but Steam still gets the same anonymous session continuity a
-        // normal fresh browser tab would have.
         var handler = new HttpClientHandler
         {
             AutomaticDecompression = DecompressionMethods.All,
@@ -48,7 +45,24 @@ public sealed class SteamInventoryService
         try
         {
             await EnsureAnonymousSessionAsync(ct).ConfigureAwait(false);
-            return await GetInventoryCoreAsync(steamId64, appId, ct).ConfigureAwait(false);
+
+            var modern = await GetModernInventoryAsync(steamId64, appId, ct).ConfigureAwait(false);
+            if (modern.Accessible || !modern.TransientFailure)
+                return modern;
+
+            // A normal browser can often open the public inventory page while direct
+            // JSON calls are being challenged. Visit that page once to refresh anonymous
+            // Steam cookies, then try the legacy JSON route used by the profile page.
+            await PrimeProfileInventoryAsync(steamId64, appId, ct).ConfigureAwait(false);
+            var legacy = await GetLegacyInventoryAsync(steamId64, appId, ct).ConfigureAwait(false);
+            if (legacy.Accessible || !legacy.TransientFailure)
+                return legacy;
+
+            return Failure(
+                appId,
+                $"modern: {CleanError(modern.Error)} | legacy: {CleanError(legacy.Error)}",
+                transient: true,
+                status: legacy.HttpStatusCode ?? modern.HttpStatusCode);
         }
         finally
         {
@@ -68,26 +82,33 @@ public sealed class SteamInventoryService
                 using var request = new HttpRequestMessage(HttpMethod.Get, "https://steamcommunity.com/");
                 request.Headers.Referrer = new Uri("https://steamcommunity.com/");
                 using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-                // The purpose of this request is only to establish an anonymous Steam
-                // Community cookie/session jar. A non-2xx response is not fatal here.
             }
             catch (OperationCanceledException) { throw; }
-            catch
-            {
-                // Inventory request below will expose the real transport/status error.
-            }
-            finally
-            {
-                _anonymousSessionPrimed = true;
-            }
+            catch { }
+            finally { _anonymousSessionPrimed = true; }
         }
-        finally
-        {
-            _sessionGate.Release();
-        }
+        finally { _sessionGate.Release(); }
     }
 
-    private async Task<SteamInventory> GetInventoryCoreAsync(string steamId64, int appId, CancellationToken ct)
+    private async Task PrimeProfileInventoryAsync(string steamId64, int appId, CancellationToken ct)
+    {
+        try
+        {
+            await PaceAsync(ct).ConfigureAwait(false);
+            var url = $"https://steamcommunity.com/profiles/{steamId64}/inventory/#730_2";
+            if (appId != 730) url = $"https://steamcommunity.com/profiles/{steamId64}/inventory/";
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Accept.Clear();
+            request.Headers.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if ((int)response.StatusCode < 500 && response.StatusCode != HttpStatusCode.TooManyRequests)
+                RegisterSuccess();
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { }
+    }
+
+    private async Task<SteamInventory> GetModernInventoryAsync(string steamId64, int appId, CancellationToken ct)
     {
         var allAssets = new List<InventoryAsset>();
         var descriptions = new Dictionary<string, InventoryDescription>(StringComparer.Ordinal);
@@ -100,151 +121,207 @@ public sealed class SteamInventoryService
             if (!string.IsNullOrWhiteSpace(startAssetId))
                 url += $"&start_assetid={Uri.EscapeDataString(startAssetId)}";
 
-            HttpResponseMessage response;
-            try
+            var payload = await SendInventoryRequestAsync(url, steamId64, ct).ConfigureAwait(false);
+            if (!payload.Success)
+                return Failure(appId, payload.Error, transient: payload.Transient, status: payload.StatusCode);
+
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(payload.Body); }
+            catch (JsonException ex)
             {
-                response = await GetWithRetryAsync(url, steamId64, ct).ConfigureAwait(false);
+                return Failure(appId, $"modern inventory invalid JSON: {ex.Message}", transient: true, status: payload.StatusCode);
             }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
+
+            using (doc)
             {
-                return Failure(appId, $"Steam inventory transport {ex.GetType().Name}: {ex.Message}", transient: true);
-            }
-
-            using (response)
-            {
-                string body;
-                try
+                var root = doc.RootElement;
+                accessible = ReadSuccess(root);
+                if (!accessible)
                 {
-                    body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
-                {
-                    return Failure(appId, $"Steam inventory body read failed: {ex.Message}", transient: true, status: (int)response.StatusCode);
+                    var detail = CleanError(ReadSteamError(root));
+                    var message = string.IsNullOrWhiteSpace(detail)
+                        ? "modern inventory success=false without details"
+                        : detail;
+                    return Failure(appId, message, transient: !IsPrivateInventoryMessage(message), status: payload.StatusCode);
                 }
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    var message = DescribeHttpError(response, body);
-                    var privateInventory = IsPrivateInventoryFailure(response.StatusCode, message);
-                    return Failure(appId, message, transient: !privateInventory, status: (int)response.StatusCode);
-                }
+                ParseModernAssets(root, allAssets);
+                ParseModernDescriptions(root, descriptions);
 
-                JsonDocument doc;
-                try
-                {
-                    doc = JsonDocument.Parse(body);
-                }
-                catch (JsonException ex)
-                {
-                    return Failure(
-                        appId,
-                        $"Steam inventory HTTP {(int)response.StatusCode} returned invalid JSON: {ex.Message}",
-                        transient: true,
-                        status: (int)response.StatusCode);
-                }
-
-                using (doc)
-                {
-                    var root = doc.RootElement;
-                    accessible = ReadSuccess(root);
-                    if (!accessible)
-                    {
-                        var detail = ReadSteamError(root);
-                        var message = string.IsNullOrWhiteSpace(detail)
-                            ? "Steam inventory response success=false without an error message"
-                            : detail!;
-                        var privateInventory = IsPrivateInventoryMessage(message);
-                        return Failure(appId, message, transient: !privateInventory, status: (int)response.StatusCode);
-                    }
-
-                    if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var asset in assets.EnumerateArray())
-                        {
-                            var assetId = GetString(asset, "assetid");
-                            var classId = GetString(asset, "classid");
-                            var instanceId = GetString(asset, "instanceid");
-                            var amount = long.TryParse(GetString(asset, "amount"), out var n) ? n : 1;
-                            if (assetId is not null && classId is not null && instanceId is not null)
-                                allAssets.Add(new InventoryAsset(assetId, classId, instanceId, amount));
-                        }
-                    }
-
-                    if (root.TryGetProperty("descriptions", out var descs) && descs.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var description in descs.EnumerateArray())
-                        {
-                            var classId = GetString(description, "classid") ?? string.Empty;
-                            var instanceId = GetString(description, "instanceid") ?? string.Empty;
-                            var marketName = GetString(description, "market_hash_name")
-                                             ?? GetString(description, "market_name")
-                                             ?? GetString(description, "name")
-                                             ?? string.Empty;
-                            var marketable = ReadFlag(description, "marketable");
-                            var inspect = FindInspectLink(description);
-                            descriptions[$"{classId}:{instanceId}"] = new InventoryDescription
-                            {
-                                ClassId = classId,
-                                InstanceId = instanceId,
-                                MarketHashName = marketName,
-                                Marketable = marketable,
-                                InspectLink = inspect
-                            };
-                        }
-                    }
-
-                    var more = ReadFlag(root, "more_items");
-                    startAssetId = GetString(root, "last_assetid");
-                    if (!more || string.IsNullOrWhiteSpace(startAssetId)) break;
-                }
+                var more = ReadFlag(root, "more_items");
+                startAssetId = GetString(root, "last_assetid");
+                if (!more || string.IsNullOrWhiteSpace(startAssetId)) break;
             }
         }
 
-        return new SteamInventory
-        {
-            AppId = appId,
-            Accessible = accessible,
-            Assets = allAssets,
-            Descriptions = descriptions
-        };
+        return Success(appId, accessible, allAssets, descriptions);
     }
 
-    private async Task<HttpResponseMessage> GetWithRetryAsync(string url, string steamId64, CancellationToken ct)
+    private async Task<SteamInventory> GetLegacyInventoryAsync(string steamId64, int appId, CancellationToken ct)
     {
-        HttpResponseMessage? last = null;
-        for (var attempt = 0; attempt < 3; attempt++)
+        var allAssets = new List<InventoryAsset>();
+        var descriptions = new Dictionary<string, InventoryDescription>(StringComparer.Ordinal);
+        string? start = null;
+        var accessible = false;
+
+        for (var page = 0; page < 40; page++)
         {
-            last?.Dispose();
-            await PaceAsync(ct).ConfigureAwait(false);
+            var url = $"https://steamcommunity.com/profiles/{steamId64}/inventory/json/{appId}/2/?l=english&count={PageSize}";
+            if (!string.IsNullOrWhiteSpace(start))
+                url += $"&start={Uri.EscapeDataString(start)}";
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.Referrer = new Uri($"https://steamcommunity.com/profiles/{steamId64}/inventory/");
-            request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
-            request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
-            request.Headers.TryAddWithoutValidation("Sec-Fetch-Mode", "cors");
-            request.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "empty");
+            var payload = await SendInventoryRequestAsync(url, steamId64, ct).ConfigureAwait(false);
+            if (!payload.Success)
+                return Failure(appId, "legacy inventory: " + payload.Error, transient: payload.Transient, status: payload.StatusCode);
 
-            last = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-            var code = (int)last.StatusCode;
-
-            if (code is 403 or 429)
-                RegisterThrottleStrike();
-            else if (code < 500)
-                RegisterSuccess();
-
-            // Retry only statuses that can realistically recover. Do not hammer Steam
-            // four times for the same player if it has already started throttling us.
-            if (code != 429 && code != 403 && code < 500) return last;
-            if (attempt < 2)
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(payload.Body); }
+            catch (JsonException ex)
             {
-                var delay = last.Headers.RetryAfter?.Delta ?? TimeSpan.FromMilliseconds(code is 403 or 429 ? 1800 * (attempt + 1) : 750 * (attempt + 1));
-                if (delay > TimeSpan.FromSeconds(8)) delay = TimeSpan.FromSeconds(8);
-                await Task.Delay(delay, ct).ConfigureAwait(false);
+                return Failure(appId, $"legacy inventory invalid JSON: {ex.Message}", transient: true, status: payload.StatusCode);
+            }
+
+            using (doc)
+            {
+                var root = doc.RootElement;
+                accessible = ReadSuccess(root);
+                if (!accessible)
+                {
+                    var detail = CleanError(ReadSteamError(root));
+                    var message = string.IsNullOrWhiteSpace(detail)
+                        ? "legacy inventory success=false without details"
+                        : detail;
+                    return Failure(appId, message, transient: !IsPrivateInventoryMessage(message), status: payload.StatusCode);
+                }
+
+                ParseLegacyAssets(root, allAssets);
+                ParseLegacyDescriptions(root, descriptions);
+
+                var more = ReadFlag(root, "more");
+                start = GetString(root, "more_start");
+                if (!more || string.IsNullOrWhiteSpace(start)) break;
             }
         }
-        return last!;
+
+        return Success(appId, accessible, allAssets, descriptions);
+    }
+
+    private async Task<RequestPayload> SendInventoryRequestAsync(string url, string steamId64, CancellationToken ct)
+    {
+        HttpResponseMessage? response = null;
+        try
+        {
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                response?.Dispose();
+                await PaceAsync(ct).ConfigureAwait(false);
+
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Referrer = new Uri($"https://steamcommunity.com/profiles/{steamId64}/inventory/");
+                request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+                request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+                request.Headers.TryAddWithoutValidation("Sec-Fetch-Mode", "cors");
+                request.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "empty");
+
+                response = await _http.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                var code = (int)response.StatusCode;
+
+                if (response.IsSuccessStatusCode)
+                {
+                    RegisterSuccess();
+                    var normalized = NormalizeErrorText(body);
+                    if (string.IsNullOrWhiteSpace(normalized))
+                        return new RequestPayload(false, body, "HTTP 200 returned empty/null inventory body", true, code);
+                    return new RequestPayload(true, body, string.Empty, false, code);
+                }
+
+                var message = DescribeHttpError(response, body);
+                var privateInventory = IsPrivateInventoryFailure(response.StatusCode, message);
+                if (code is 403 or 429) RegisterThrottleStrike();
+
+                if (privateInventory)
+                    return new RequestPayload(false, body, message, false, code);
+
+                if (attempt == 0 && (code is 403 or 429 || code >= 500))
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(code == 429 ? 5 : 2), ct).ConfigureAwait(false);
+                    continue;
+                }
+
+                return new RequestPayload(false, body, message, true, code);
+            }
+
+            return new RequestPayload(false, string.Empty, "inventory request exhausted retries", true, response is null ? null : (int)response.StatusCode);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            return new RequestPayload(false, string.Empty, $"inventory transport {ex.GetType().Name}: {ex.Message}", true, null);
+        }
+        finally { response?.Dispose(); }
+    }
+
+    private static void ParseModernAssets(JsonElement root, List<InventoryAsset> assetsOut)
+    {
+        if (!root.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array) return;
+        foreach (var asset in assets.EnumerateArray())
+        {
+            var assetId = GetString(asset, "assetid");
+            var classId = GetString(asset, "classid");
+            var instanceId = GetString(asset, "instanceid") ?? "0";
+            var amount = long.TryParse(GetString(asset, "amount"), out var n) ? n : 1;
+            if (assetId is not null && classId is not null)
+                assetsOut.Add(new InventoryAsset(assetId, classId, instanceId, Math.Max(1, amount)));
+        }
+    }
+
+    private static void ParseModernDescriptions(JsonElement root, Dictionary<string, InventoryDescription> descriptions)
+    {
+        if (!root.TryGetProperty("descriptions", out var values) || values.ValueKind != JsonValueKind.Array) return;
+        foreach (var description in values.EnumerateArray())
+            AddDescription(description, descriptions);
+    }
+
+    private static void ParseLegacyAssets(JsonElement root, List<InventoryAsset> assetsOut)
+    {
+        if (!root.TryGetProperty("rgInventory", out var inventory) || inventory.ValueKind != JsonValueKind.Object) return;
+        foreach (var property in inventory.EnumerateObject())
+        {
+            var asset = property.Value;
+            var assetId = GetString(asset, "id") ?? GetString(asset, "assetid") ?? property.Name;
+            var classId = GetString(asset, "classid");
+            var instanceId = GetString(asset, "instanceid") ?? "0";
+            var amount = long.TryParse(GetString(asset, "amount"), out var n) ? n : 1;
+            if (!string.IsNullOrWhiteSpace(assetId) && !string.IsNullOrWhiteSpace(classId))
+                assetsOut.Add(new InventoryAsset(assetId, classId, instanceId, Math.Max(1, amount)));
+        }
+    }
+
+    private static void ParseLegacyDescriptions(JsonElement root, Dictionary<string, InventoryDescription> descriptions)
+    {
+        if (!root.TryGetProperty("rgDescriptions", out var values) || values.ValueKind != JsonValueKind.Object) return;
+        foreach (var property in values.EnumerateObject())
+            AddDescription(property.Value, descriptions);
+    }
+
+    private static void AddDescription(JsonElement description, Dictionary<string, InventoryDescription> descriptions)
+    {
+        var classId = GetString(description, "classid") ?? string.Empty;
+        var instanceId = GetString(description, "instanceid") ?? "0";
+        if (string.IsNullOrWhiteSpace(classId)) return;
+        var marketName = GetString(description, "market_hash_name")
+                         ?? GetString(description, "market_name")
+                         ?? GetString(description, "name")
+                         ?? string.Empty;
+        descriptions[$"{classId}:{instanceId}"] = new InventoryDescription
+        {
+            ClassId = classId,
+            InstanceId = instanceId,
+            MarketHashName = marketName,
+            Marketable = ReadFlag(description, "marketable"),
+            InspectLink = FindInspectLink(description)
+        };
     }
 
     private async Task PaceAsync(CancellationToken ct)
@@ -256,7 +333,6 @@ public sealed class SteamInventoryService
             var target = _nextRequestUtc;
             if (_cooldownUntilUtc > target) target = _cooldownUntilUtc;
             if (target < now) target = now;
-
             delay = target - now;
             var spacing = _throttleStrikes > 0 ? ThrottledSpacing : NormalSpacing;
             _nextRequestUtc = target + spacing;
@@ -272,10 +348,10 @@ public sealed class SteamInventoryService
             _throttleStrikes = Math.Min(4, _throttleStrikes + 1);
             var seconds = _throttleStrikes switch
             {
-                1 => 15,
-                2 => 30,
-                3 => 60,
-                _ => 90
+                1 => 20,
+                2 => 40,
+                3 => 75,
+                _ => 120
             };
             var until = DateTime.UtcNow + TimeSpan.FromSeconds(seconds);
             if (until > _cooldownUntilUtc) _cooldownUntilUtc = until;
@@ -292,6 +368,18 @@ public sealed class SteamInventoryService
         }
     }
 
+    private static SteamInventory Success(
+        int appId,
+        bool accessible,
+        List<InventoryAsset> assets,
+        Dictionary<string, InventoryDescription> descriptions) => new()
+    {
+        AppId = appId,
+        Accessible = accessible,
+        Assets = assets,
+        Descriptions = descriptions
+    };
+
     private static SteamInventory Failure(int appId, string message, bool transient, int? status = null) => new()
     {
         AppId = appId,
@@ -305,19 +393,23 @@ public sealed class SteamInventoryService
     {
         var code = (int)response.StatusCode;
         var reason = string.IsNullOrWhiteSpace(response.ReasonPhrase) ? response.StatusCode.ToString() : response.ReasonPhrase!;
-        var detail = NormalizeErrorText(ReadSteamError(body));
-
+        var detail = CleanError(ReadSteamError(body));
         if (string.IsNullOrWhiteSpace(detail))
         {
             return response.StatusCode switch
             {
-                HttpStatusCode.Forbidden => $"Steam inventory HTTP {code} {reason}: empty/null body; Steam is temporarily rejecting inventory requests (rate limit/anti-bot) rather than proving the inventory is private",
-                HttpStatusCode.TooManyRequests => $"Steam inventory HTTP {code} {reason}: Steam rate limit reached",
-                _ => $"Steam inventory HTTP {code} {reason}"
+                HttpStatusCode.Forbidden => $"HTTP {code} {reason}: empty/null body (Steam throttle/anti-bot)",
+                HttpStatusCode.TooManyRequests => $"HTTP {code} {reason}: Steam rate limit reached",
+                _ => $"HTTP {code} {reason}"
             };
         }
+        return $"HTTP {code} {reason}: {detail}";
+    }
 
-        return $"Steam inventory HTTP {code} {reason}: {detail}";
+    private static string CleanError(string? value)
+    {
+        var normalized = NormalizeErrorText(value);
+        return string.IsNullOrWhiteSpace(normalized) ? "no details" : normalized;
     }
 
     private static string? NormalizeErrorText(string? value)
@@ -352,7 +444,7 @@ public sealed class SteamInventoryService
         {
             JsonValueKind.True => true,
             JsonValueKind.False => false,
-            JsonValueKind.Number => value.TryGetInt32(out var n) && n != 0,
+            JsonValueKind.Number => value.TryGetInt64(out var n) && n != 0,
             JsonValueKind.String => value.GetString() is "1" or "true" or "True",
             _ => false
         };
@@ -394,7 +486,6 @@ public sealed class SteamInventoryService
         if (root.ValueKind == JsonValueKind.String) return root.GetString();
         if (root.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
         if (root.ValueKind != JsonValueKind.Object) return root.GetRawText();
-
         foreach (var key in new[] { "Error", "error", "message", "strError" })
         {
             if (!root.TryGetProperty(key, out var value)) continue;
@@ -426,7 +517,16 @@ public sealed class SteamInventoryService
         {
             JsonValueKind.String => value.GetString(),
             JsonValueKind.Number => value.GetRawText(),
+            JsonValueKind.True => "1",
+            JsonValueKind.False => "0",
             _ => null
         };
     }
+
+    private sealed record RequestPayload(
+        bool Success,
+        string Body,
+        string Error,
+        bool Transient,
+        int? StatusCode);
 }
