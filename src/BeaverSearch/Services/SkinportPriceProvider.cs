@@ -15,13 +15,15 @@ namespace BeaverSearch.Services;
 /// Dota 2 -> market.dota2.net public RUB feed -> Skinport -> Steam Market fallback
 /// Rust -> Skinport -> Steam Market fallback.
 ///
-/// Bulk feeds are cached, and only missing names use the slower Steam Market reader.
+/// Bulk feeds are cached, and only a very small number of missing names are allowed
+/// to touch Steam Market. Inventory reliability has priority over perfect pricing of
+/// every cheap/rare item because both endpoints share steamcommunity.com/IP pressure.
 /// </summary>
 public sealed class SkinportPriceProvider
 {
     private static readonly TimeSpan CatalogTtl = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan FailureTtl = TimeSpan.FromMinutes(2);
-    private const int MaxSteamFallbackNames = 20;
+    private const int MaxSteamFallbackNames = 4;
 
     private readonly HttpClient _http;
     private readonly SteamMarketPriceProvider _steamMarket = new();
@@ -72,8 +74,9 @@ public sealed class SkinportPriceProvider
                 missing.Add(name);
         }
 
-        // A bulk source outage must not fail the whole player. Fill a bounded number
-        // of gaps from Steam Market. Common items are then shared through its cache.
+        // Keep this fallback intentionally tiny. CS2/Dota bulk feeds should satisfy
+        // almost everything; a large Steam Market fallback can trigger the same IP
+        // throttle that protects the raw inventory endpoint.
         if (missing.Count > 0)
         {
             var fallback = await _steamMarket.GetPricesAsync(
@@ -127,8 +130,6 @@ public sealed class SkinportPriceProvider
 
     private async Task<Dictionary<string, decimal>> LoadCs2CatalogAsync(CancellationToken ct)
     {
-        // Primary: free public no-key CS2 price feed. It returns USD prices and is
-        // intentionally used only as a valuation reference, not for trading actions.
         try
         {
             using var response = await SendJsonAsync("https://api.skincash.gg/v1/prices", ct).ConfigureAwait(false);
@@ -156,13 +157,11 @@ public sealed class SkinportPriceProvider
         catch (OperationCanceledException) { throw; }
         catch { }
 
-        // Secondary: Skinport. Their /v1/items endpoint explicitly requires Brotli.
         return await LoadSkinportCatalogAsync(730, ct).ConfigureAwait(false);
     }
 
     private async Task<Dictionary<string, decimal>> LoadDotaCatalogAsync(CancellationToken ct)
     {
-        // Public RUB feed. No account/API key is needed for the price list.
         try
         {
             using var response = await SendJsonAsync("https://market.dota2.net/api/v2/prices/class_instance/RUB.json", ct).ConfigureAwait(false);
