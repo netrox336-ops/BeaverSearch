@@ -7,14 +7,15 @@ using System.Text.RegularExpressions;
 namespace BeaverSearch.Services;
 
 /// <summary>
-/// Conservative last-resort Steam Community Market price reader.
-/// Bulk providers should satisfy most names. This class only fills remaining gaps
-/// and deliberately sends one paced request at a time to avoid another IP throttle.
+/// Very conservative last-resort Steam Community Market price reader.
+/// Bulk providers are primary. This endpoint shares steamcommunity.com/IP pressure
+/// with inventory reads, so it is intentionally slow, serialized and never retries
+/// 403/429 immediately.
 /// </summary>
 public sealed class SteamMarketPriceProvider
 {
-    private static readonly TimeSpan PositiveTtl = TimeSpan.FromMinutes(20);
-    private static readonly TimeSpan NegativeTtl = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan PositiveTtl = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan NegativeTtl = TimeSpan.FromMinutes(5);
     private static readonly Regex NumberRegex = new(@"\d[\d\s\u00A0\u202F]*(?:[\.,]\d{1,2})?", RegexOptions.Compiled);
 
     private readonly HttpClient _http;
@@ -34,7 +35,7 @@ public sealed class SteamMarketPriceProvider
             UseCookies = true,
             CookieContainer = new CookieContainer()
         };
-        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(18) };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36");
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/json,text/plain,*/*");
         _http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("ru-RU,ru;q=0.9,en;q=0.6");
@@ -79,47 +80,39 @@ public sealed class SteamMarketPriceProvider
             if (TryGetCached(key, out cached)) return cached;
 
             decimal price = 0;
-            for (var attempt = 0; attempt < 2; attempt++)
+            await _requestGate.WaitAsync(ct).ConfigureAwait(false);
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                await _requestGate.WaitAsync(ct).ConfigureAwait(false);
-                try
+                await PaceRequestsAsync(ct).ConfigureAwait(false);
+                var url = "https://steamcommunity.com/market/priceoverview/" +
+                          $"?currency=5&country=RU&appid={appId}&market_hash_name={Uri.EscapeDataString(marketHashName)}";
+                using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                var code = (int)response.StatusCode;
+                if (code is 403 or 429)
                 {
-                    await PaceRequestsAsync(ct).ConfigureAwait(false);
-                    var url = "https://steamcommunity.com/market/priceoverview/" +
-                              $"?currency=5&country=RU&appid={appId}&market_hash_name={Uri.EscapeDataString(marketHashName)}";
-                    using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-                    var code = (int)response.StatusCode;
-                    if (code is 403 or 429 || code >= 500)
-                    {
-                        RegisterThrottle(code);
-                        if (attempt == 0)
-                            await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
-                        continue;
-                    }
-
-                    if (!response.IsSuccessStatusCode) break;
+                    RegisterThrottle(code);
+                }
+                else if (response.IsSuccessStatusCode)
+                {
                     await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                     using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
                     var root = doc.RootElement;
-                    if (root.ValueKind != JsonValueKind.Object) break;
-                    if (root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
-                        break;
-
-                    price = ReadPrice(root, "lowest_price");
-                    if (price <= 0) price = ReadPrice(root, "median_price");
-                    if (price > 0) break;
+                    if (root.ValueKind == JsonValueKind.Object &&
+                        (!root.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.False))
+                    {
+                        price = ReadPrice(root, "lowest_price");
+                        if (price <= 0) price = ReadPrice(root, "median_price");
+                    }
                 }
-                catch (OperationCanceledException) { throw; }
-                catch
-                {
-                    if (attempt == 0)
-                        await Task.Delay(TimeSpan.FromMilliseconds(900), ct).ConfigureAwait(false);
-                }
-                finally
-                {
-                    _requestGate.Release();
-                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch
+            {
+                // Best effort only. Bulk catalogs are the primary pricing source.
+            }
+            finally
+            {
+                _requestGate.Release();
             }
 
             var ttl = price > 0 ? PositiveTtl : NegativeTtl;
@@ -152,16 +145,17 @@ public sealed class SteamMarketPriceProvider
             var target = _nextRequestUtc > now ? _nextRequestUtc : now;
             if (_cooldownUntilUtc > target) target = _cooldownUntilUtc;
             delay = target - now;
-            _nextRequestUtc = target + TimeSpan.FromMilliseconds(850);
+            _nextRequestUtc = target + TimeSpan.FromSeconds(6);
         }
-        if (delay > TimeSpan.Zero) await Task.Delay(delay, ct).ConfigureAwait(false);
+        if (delay > TimeSpan.Zero)
+            await Task.Delay(delay, ct).ConfigureAwait(false);
     }
 
     private void RegisterThrottle(int code)
     {
         lock (_paceLock)
         {
-            var cooldown = code == 429 ? TimeSpan.FromSeconds(30) : TimeSpan.FromSeconds(12);
+            var cooldown = code == 429 ? TimeSpan.FromMinutes(3) : TimeSpan.FromMinutes(1);
             var until = DateTime.UtcNow + cooldown;
             if (until > _cooldownUntilUtc) _cooldownUntilUtc = until;
         }
