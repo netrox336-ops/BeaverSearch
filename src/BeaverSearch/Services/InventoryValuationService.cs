@@ -26,31 +26,28 @@ public sealed class InventoryValuationService
         await _playerValuationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // Do NOT fan out CS2/Dota/Rust at once. Steam Community inventory is an
-            // IP-rate-limited endpoint; three simultaneous requests per player caused
-            // bursts of HTTP 403/429 and the old "CS2:null | Dota:null | Rust:null"
-            // errors. Query games sequentially and stop immediately on a transient
-            // Steam failure so two more requests cannot make the throttle worse.
+            // Query games sequentially. If Steam starts throttling halfway through a
+            // player, keep already valid game valuations instead of throwing them away.
             var cs = await ValueGameAsync(steamId64, 730, csFloatApiKey, ct).ConfigureAwait(false);
-            ThrowIfTemporary(cs);
-
-            var dota = await ValueGameAsync(steamId64, 570, string.Empty, ct).ConfigureAwait(false);
-            ThrowIfTemporary(dota);
-
-            var rust = await ValueGameAsync(steamId64, 252490, string.Empty, ct).ConfigureAwait(false);
-            ThrowIfTemporary(rust);
-
-            var result = new PlayerValuation(cs, dota, rust);
-            var games = new[] { result.Cs2, result.Dota2, result.Rust };
-            if (games.Any(x => x.Accessible && x.MarketableItems > 0 && !x.PricingAvailable))
+            if (cs.TemporaryFailure)
             {
-                var affected = string.Join(", ", games
-                    .Where(x => x.Accessible && x.MarketableItems > 0 && !x.PricingAvailable)
-                    .Select(x => GameName(x.AppId)));
-                throw new HttpRequestException($"Price provider не вернул ни одной цены для marketable inventory: {affected}. Ложный 0 ₽ не кэшируется.");
+                return new PlayerValuation(
+                    cs,
+                    DeferredGame(570, "не проверено: CS2 inventory временно недоступен"),
+                    DeferredGame(252490, "не проверено: CS2 inventory временно недоступен"));
             }
 
-            return result;
+            var dota = await ValueGameAsync(steamId64, 570, string.Empty, ct).ConfigureAwait(false);
+            if (dota.TemporaryFailure)
+            {
+                return new PlayerValuation(
+                    cs,
+                    dota,
+                    DeferredGame(252490, "не проверено: Dota 2 inventory временно недоступен"));
+            }
+
+            var rust = await ValueGameAsync(steamId64, 252490, string.Empty, ct).ConfigureAwait(false);
+            return new PlayerValuation(cs, dota, rust);
         }
         finally
         {
@@ -68,21 +65,18 @@ public sealed class InventoryValuationService
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            return new GameValuation(appId, 0, 0, false, 0)
-            {
-                TemporaryFailure = true,
-                Error = $"Steam inventory transport {ex.GetType().Name}: {ex.Message}"
-            };
+            return TemporaryGame(appId, $"Steam inventory transport {ex.GetType().Name}: {ex.Message}");
         }
 
         if (!inventory.Accessible)
         {
+            var error = string.IsNullOrWhiteSpace(inventory.Error)
+                ? $"Steam inventory unavailable{(inventory.HttpStatusCode is int code ? $" (HTTP {code})" : string.Empty)}"
+                : inventory.Error!;
             return new GameValuation(appId, 0, 0, false, 0)
             {
                 TemporaryFailure = inventory.TransientFailure,
-                Error = string.IsNullOrWhiteSpace(inventory.Error)
-                    ? $"Steam inventory unavailable{(inventory.HttpStatusCode is int code ? $" (HTTP {code})" : string.Empty)}"
-                    : inventory.Error
+                Error = error
             };
         }
 
@@ -107,10 +101,27 @@ public sealed class InventoryValuationService
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            throw new HttpRequestException($"{GameName(appId)} price provider: {ex.Message}", ex);
+            return new GameValuation(appId, 0, itemCount, true, marketableItems)
+            {
+                MarketableItems = marketableItems,
+                PricingAvailable = false,
+                TemporaryFailure = true,
+                Error = $"{GameName(appId)} price provider: {ex.Message}"
+            };
         }
 
         var pricingAvailable = marketNames.Count == 0 || prices.Count > 0;
+        if (!pricingAvailable && marketableItems > 0)
+        {
+            return new GameValuation(appId, 0, itemCount, true, marketableItems)
+            {
+                MarketableItems = marketableItems,
+                PricingAvailable = false,
+                TemporaryFailure = true,
+                Error = $"{GameName(appId)}: ни один price source не вернул цену для marketable-предметов"
+            };
+        }
+
         var lines = new List<(InventoryAsset Asset, InventoryDescription? Desc, decimal UnitPrice)>(inventory.Assets.Count);
         var unpriced = 0;
 
@@ -145,7 +156,7 @@ public sealed class InventoryValuationService
                     if (index >= 0) lines[index] = (candidate.Asset, candidate.Desc, comparable.Value);
                 }
                 catch (OperationCanceledException) { throw; }
-                catch { /* Advanced valuation is best-effort; base market price remains valid. */ }
+                catch { }
             }
         }
 
@@ -157,12 +168,17 @@ public sealed class InventoryValuationService
         };
     }
 
-    private static void ThrowIfTemporary(GameValuation game)
+    private static GameValuation TemporaryGame(int appId, string error) => new(appId, 0, 0, false, 0)
     {
-        if (!game.TemporaryFailure) return;
-        var reason = string.IsNullOrWhiteSpace(game.Error) ? "временная ошибка Steam inventory без деталей" : game.Error.Trim();
-        throw new HttpRequestException($"{GameName(game.AppId)}: {reason}");
-    }
+        TemporaryFailure = true,
+        Error = error
+    };
+
+    private static GameValuation DeferredGame(int appId, string reason) => new(appId, 0, 0, false, 0)
+    {
+        TemporaryFailure = true,
+        Error = reason
+    };
 
     private static string GameName(int appId) => appId switch
     {
