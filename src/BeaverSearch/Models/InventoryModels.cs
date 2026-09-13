@@ -36,4 +36,9 @@ public sealed record PlayerValuation(
     GameValuation Rust)
 {
     public decimal Total => Cs2.ValueRub + Dota2.ValueRub + Rust.ValueRub;
+    public bool HasTemporaryFailures => Cs2.TemporaryFailure || Dota2.TemporaryFailure || Rust.TemporaryFailure;
+    public bool HasAnySuccessfulGame =>
+        (Cs2.Accessible && !Cs2.TemporaryFailure) ||
+        (Dota2.Accessible && !Dota2.TemporaryFailure) ||
+        (Rust.Accessible && !Rust.TemporaryFailure);
 }
