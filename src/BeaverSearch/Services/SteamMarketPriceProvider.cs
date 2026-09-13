@@ -7,34 +7,35 @@ using System.Text.RegularExpressions;
 namespace BeaverSearch.Services;
 
 /// <summary>
-/// Lightweight Steam Community Market price reader.
-///
-/// Prices are fetched only for market_hash_name values that actually occur in a
-/// scanned inventory. Results are cached globally across players so common items
-/// do not cause repeated requests. Currency id 5 is RUB on the Community Market.
+/// Conservative last-resort Steam Community Market price reader.
+/// Bulk providers should satisfy most names. This class only fills remaining gaps
+/// and deliberately sends one paced request at a time to avoid another IP throttle.
 /// </summary>
 public sealed class SteamMarketPriceProvider
 {
-    private static readonly TimeSpan PositiveTtl = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan NegativeTtl = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan PositiveTtl = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan NegativeTtl = TimeSpan.FromMinutes(3);
     private static readonly Regex NumberRegex = new(@"\d[\d\s\u00A0\u202F]*(?:[\.,]\d{1,2})?", RegexOptions.Compiled);
 
     private readonly HttpClient _http;
-    private readonly SemaphoreSlim _requestGate = new(4, 4);
+    private readonly SemaphoreSlim _requestGate = new(1, 1);
     private readonly ConcurrentDictionary<PriceKey, PriceCacheEntry> _cache = new();
     private readonly ConcurrentDictionary<PriceKey, SemaphoreSlim> _itemGates = new();
     private readonly object _paceLock = new();
     private DateTime _nextRequestUtc = DateTime.MinValue;
+    private DateTime _cooldownUntilUtc = DateTime.MinValue;
 
     public SteamMarketPriceProvider()
     {
         var handler = new HttpClientHandler
         {
             AutomaticDecompression = DecompressionMethods.All,
-            AllowAutoRedirect = true
+            AllowAutoRedirect = true,
+            UseCookies = true,
+            CookieContainer = new CookieContainer()
         };
-        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36 BeaverSearch/0.4.1");
+        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36");
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/json,text/plain,*/*");
         _http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("ru-RU,ru;q=0.9,en;q=0.6");
         _http.DefaultRequestHeaders.Referrer = new Uri("https://steamcommunity.com/market/");
@@ -56,16 +57,13 @@ public sealed class SteamMarketPriceProvider
         if (names.Length == 0)
             return new Dictionary<string, decimal>(StringComparer.Ordinal);
 
-        var result = new ConcurrentDictionary<string, decimal>(StringComparer.Ordinal);
-        await Parallel.ForEachAsync(
-            names,
-            new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
-            async (name, token) =>
-            {
-                var price = await GetPriceAsync(appId, name, token).ConfigureAwait(false);
-                if (price > 0) result[name] = price;
-            }).ConfigureAwait(false);
-
+        var result = new Dictionary<string, decimal>(StringComparer.Ordinal);
+        foreach (var name in names)
+        {
+            ct.ThrowIfCancellationRequested();
+            var price = await GetPriceAsync(appId, name, ct).ConfigureAwait(false);
+            if (price > 0) result[name] = price;
+        }
         return result;
     }
 
@@ -81,8 +79,7 @@ public sealed class SteamMarketPriceProvider
             if (TryGetCached(key, out cached)) return cached;
 
             decimal price = 0;
-            Exception? lastError = null;
-            for (var attempt = 0; attempt < 3; attempt++)
+            for (var attempt = 0; attempt < 2; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
                 await _requestGate.WaitAsync(ct).ConfigureAwait(false);
@@ -93,14 +90,11 @@ public sealed class SteamMarketPriceProvider
                               $"?currency=5&country=RU&appid={appId}&market_hash_name={Uri.EscapeDataString(marketHashName)}";
                     using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
                     var code = (int)response.StatusCode;
-                    if (code == 429 || code >= 500)
+                    if (code is 403 or 429 || code >= 500)
                     {
-                        if (attempt < 2)
-                        {
-                            var retry = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromMilliseconds(700 * (attempt + 1));
-                            if (retry > TimeSpan.FromSeconds(5)) retry = TimeSpan.FromSeconds(5);
-                            await Task.Delay(retry, ct).ConfigureAwait(false);
-                        }
+                        RegisterThrottle(code);
+                        if (attempt == 0)
+                            await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
                         continue;
                     }
 
@@ -108,6 +102,7 @@ public sealed class SteamMarketPriceProvider
                     await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                     using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
                     var root = doc.RootElement;
+                    if (root.ValueKind != JsonValueKind.Object) break;
                     if (root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
                         break;
 
@@ -116,11 +111,10 @@ public sealed class SteamMarketPriceProvider
                     if (price > 0) break;
                 }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
+                catch
                 {
-                    lastError = ex;
-                    if (attempt < 2)
-                        await Task.Delay(TimeSpan.FromMilliseconds(500 * (attempt + 1)), ct).ConfigureAwait(false);
+                    if (attempt == 0)
+                        await Task.Delay(TimeSpan.FromMilliseconds(900), ct).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -129,7 +123,7 @@ public sealed class SteamMarketPriceProvider
             }
 
             var ttl = price > 0 ? PositiveTtl : NegativeTtl;
-            _cache[key] = new PriceCacheEntry(DateTime.UtcNow + ttl, price, lastError?.Message);
+            _cache[key] = new PriceCacheEntry(DateTime.UtcNow + ttl, price);
             return price;
         }
         finally
@@ -155,11 +149,22 @@ public sealed class SteamMarketPriceProvider
         lock (_paceLock)
         {
             var now = DateTime.UtcNow;
-            delay = _nextRequestUtc > now ? _nextRequestUtc - now : TimeSpan.Zero;
-            var baseTime = _nextRequestUtc > now ? _nextRequestUtc : now;
-            _nextRequestUtc = baseTime + TimeSpan.FromMilliseconds(180);
+            var target = _nextRequestUtc > now ? _nextRequestUtc : now;
+            if (_cooldownUntilUtc > target) target = _cooldownUntilUtc;
+            delay = target - now;
+            _nextRequestUtc = target + TimeSpan.FromMilliseconds(850);
         }
         if (delay > TimeSpan.Zero) await Task.Delay(delay, ct).ConfigureAwait(false);
+    }
+
+    private void RegisterThrottle(int code)
+    {
+        lock (_paceLock)
+        {
+            var cooldown = code == 429 ? TimeSpan.FromSeconds(30) : TimeSpan.FromSeconds(12);
+            var until = DateTime.UtcNow + cooldown;
+            if (until > _cooldownUntilUtc) _cooldownUntilUtc = until;
+        }
     }
 
     private static decimal ReadPrice(JsonElement root, string property)
@@ -187,5 +192,5 @@ public sealed class SteamMarketPriceProvider
     }
 
     private readonly record struct PriceKey(int AppId, string MarketHashName);
-    private sealed record PriceCacheEntry(DateTime ExpiresUtc, decimal PriceRub, string? Error);
+    private sealed record PriceCacheEntry(DateTime ExpiresUtc, decimal PriceRub);
 }
