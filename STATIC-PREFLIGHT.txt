@@ -1,6 +1,6 @@
 BeaverSearch v0.4.1 FixSteamID STATIC PREFLIGHT: RE-RUN REQUIRED
 
-Этот сохранённый отчёт намеренно инвалидирован изменениями valuation/inventory pipeline v5 от 2026-09-13.
+Этот сохранённый отчёт намеренно инвалидирован изменениями Steam inventory/valuation pipeline v6 от 2026-09-13.
 Актуальные STATIC-PREFLIGHT.ps1 и HOTFIX-PREFLIGHT.ps1 автоматически запускаются START.bat на Windows до dotnet build.
 
 Ключевые проверки текущей ревизии:
@@ -8,13 +8,15 @@ BeaverSearch v0.4.1 FixSteamID STATIC PREFLIGHT: RE-RUN REQUIRED
 - Win32 ICO bounds / CS7065 trap
 - отсутствие C# async ref/out / CS1988 trap
 - exact SteamID pipeline yooma.su + CYBERSHOKE
-- monitoring batches: 10 servers / max 40 new scans / no 90s overlap
-- Steam inventory modern + legacy profile JSON fallback
-- serialized Steam Community requests + cooldown
-- multi-source CS2/Dota/Rust price pipeline
+- monitoring batches: 10 servers / no overlap
+- Steam profile `g_rgAppContextData` app-presence precheck
+- Steam inventory modern-only, count=2000, gate=1, 10s pacing
+- 401/null empty-app normalization; legacy retry storm forbidden
+- adaptive 403/429 cooldown
+- CS2/Dota bulk pricing + tiny paced Steam Market fallback
 - partial valuation cache protection
-- PriceEngineVersion 5 migration
+- PriceEngineVersion 6 migration
 - Chromium CDP gate=1 / compact DOM / WebSocket capture
 - отсутствие .github/workflows
 
-Запустите START.bat: этот файл будет перезаписан фактическим STATIC-PREFLIGHT PASS/FAIL, затем HOTFIX-PREFLIGHT проверит runtime-source markers и только после этого запустится native dotnet build.
+Запустите START.bat: этот файл будет перезаписан фактическим STATIC-PREFLIGHT PASS/FAIL, затем HOTFIX-PREFLIGHT проверит v6 runtime-source markers и только после этого запустится native dotnet build.
