@@ -5,7 +5,7 @@ namespace BeaverSearch.Services;
 
 public sealed class LocalStore
 {
-    private const int CurrentPriceEngineVersion = 5;
+    private const int CurrentPriceEngineVersion = 6;
     private readonly string _root;
     private readonly string _settingsPath;
     private readonly string _cachePath;
@@ -51,8 +51,8 @@ public sealed class LocalStore
         if (!hasVersionMarker || cache.PriceEngineVersion != CurrentPriceEngineVersion)
         {
             // Keep exact SteamID/name discoveries, but invalidate old valuation checks.
-            // v5 fixes both inventory retrieval fallback and the price source chain, so
-            // previously stored false-zero/failed checks must be evaluated again.
+            // v6 changes public-inventory request semantics and must not reuse any v5
+            // result that may have been influenced by 401/429/legacy fallback behaviour.
             cache.SteamChecks.Clear();
             cache.PriceEngineVersion = CurrentPriceEngineVersion;
             await WriteAsync(_cachePath, cache).ConfigureAwait(false);
