@@ -5,9 +5,10 @@ namespace BeaverSearch.Services;
 public sealed class InventoryValuationService
 {
     private readonly SteamInventoryService _inventory;
+    private readonly SteamInventoryPresenceService _presence = new();
     private readonly SkinportPriceProvider _prices;
     private readonly CsFloatComparableProvider _csFloat;
-    private readonly SemaphoreSlim _playerValuationGate = new(4, 4);
+    private readonly SemaphoreSlim _playerValuationGate = new(2, 2);
 
     public InventoryValuationService(
         SteamInventoryService inventory,
@@ -26,27 +27,36 @@ public sealed class InventoryValuationService
         await _playerValuationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // Query games sequentially. If Steam starts throttling halfway through a
-            // player, keep already valid game valuations instead of throwing them away.
-            var cs = await ValueGameAsync(steamId64, 730, csFloatApiKey, ct).ConfigureAwait(false);
+            // One ordinary profile inventory HTML page tells us which app inventories
+            // actually contain items. This avoids two needless JSON calls for Dota/Rust
+            // on the majority of CS2 players and is the main protection against 429.
+            var presence = await _presence.GetAsync(steamId64, ct).ConfigureAwait(false);
+
+            var cs = presence.IsKnownEmpty(730)
+                ? EmptyGame(730, "Steam profile inventory: 0 items")
+                : await ValueGameAsync(steamId64, 730, csFloatApiKey, ct).ConfigureAwait(false);
             if (cs.TemporaryFailure)
             {
                 return new PlayerValuation(
                     cs,
-                    DeferredGame(570, "не проверено: CS2 inventory временно недоступен"),
-                    DeferredGame(252490, "не проверено: CS2 inventory временно недоступен"));
+                    presence.IsKnownEmpty(570) ? EmptyGame(570, "Steam profile inventory: 0 items") : DeferredGame(570, "не проверено: CS2 inventory временно недоступен"),
+                    presence.IsKnownEmpty(252490) ? EmptyGame(252490, "Steam profile inventory: 0 items") : DeferredGame(252490, "не проверено: CS2 inventory временно недоступен"));
             }
 
-            var dota = await ValueGameAsync(steamId64, 570, string.Empty, ct).ConfigureAwait(false);
+            var dota = presence.IsKnownEmpty(570)
+                ? EmptyGame(570, "Steam profile inventory: 0 items")
+                : await ValueGameAsync(steamId64, 570, string.Empty, ct).ConfigureAwait(false);
             if (dota.TemporaryFailure)
             {
                 return new PlayerValuation(
                     cs,
                     dota,
-                    DeferredGame(252490, "не проверено: Dota 2 inventory временно недоступен"));
+                    presence.IsKnownEmpty(252490) ? EmptyGame(252490, "Steam profile inventory: 0 items") : DeferredGame(252490, "не проверено: Dota 2 inventory временно недоступен"));
             }
 
-            var rust = await ValueGameAsync(steamId64, 252490, string.Empty, ct).ConfigureAwait(false);
+            var rust = presence.IsKnownEmpty(252490)
+                ? EmptyGame(252490, "Steam profile inventory: 0 items")
+                : await ValueGameAsync(steamId64, 252490, string.Empty, ct).ConfigureAwait(false);
             return new PlayerValuation(cs, dota, rust);
         }
         finally
@@ -70,6 +80,13 @@ public sealed class InventoryValuationService
 
         if (!inventory.Accessible)
         {
+            // Defensive compatibility: current Steam Community behaviour can use
+            // HTTP 401 + empty/null body for an unallocated/empty app inventory.
+            // SteamInventoryService already normalizes it, but keep this guard so a
+            // future parser change cannot turn an empty Rust/Dota inventory into an error.
+            if (inventory.HttpStatusCode == 401 && IsNoDetails401(inventory.Error))
+                return EmptyGame(appId, "Steam 401 empty/unallocated inventory");
+
             var error = string.IsNullOrWhiteSpace(inventory.Error)
                 ? $"Steam inventory unavailable{(inventory.HttpStatusCode is int code ? $" (HTTP {code})" : string.Empty)}"
                 : inventory.Error!;
@@ -92,6 +109,9 @@ public sealed class InventoryValuationService
             marketableItems += amount;
             marketNames.Add(desc.MarketHashName.Trim());
         }
+
+        if (itemCount == 0)
+            return EmptyGame(appId, "0 items");
 
         IReadOnlyDictionary<string, decimal> prices;
         try
@@ -124,7 +144,6 @@ public sealed class InventoryValuationService
 
         var lines = new List<(InventoryAsset Asset, InventoryDescription? Desc, decimal UnitPrice)>(inventory.Assets.Count);
         var unpriced = 0;
-
         foreach (var asset in inventory.Assets)
         {
             inventory.Descriptions.TryGetValue($"{asset.ClassId}:{asset.InstanceId}", out var desc);
@@ -167,6 +186,21 @@ public sealed class InventoryValuationService
             PricingAvailable = pricingAvailable
         };
     }
+
+    private static bool IsNoDetails401(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error)) return true;
+        var text = error.ToLowerInvariant();
+        return text.Contains("no details") || text.Contains("null") || text.Contains("empty") || text.Contains("unallocated");
+    }
+
+    private static GameValuation EmptyGame(int appId, string note) => new(appId, 0, 0, true, 0)
+    {
+        MarketableItems = 0,
+        PricingAvailable = true,
+        TemporaryFailure = false,
+        Error = note
+    };
 
     private static GameValuation TemporaryGame(int appId, string error) => new(appId, 0, 0, false, 0)
     {
