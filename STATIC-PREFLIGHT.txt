@@ -1,20 +1,20 @@
 BeaverSearch v0.4.1 FixSteamID STATIC PREFLIGHT: RE-RUN REQUIRED
 
-Этот файл был инвалидирован изменениями FixSteamID r4 от 2026-09-08.
-Актуальный STATIC-PREFLIGHT.ps1 уже обновлён и будет автоматически запущен START.bat на Windows перед dotnet build.
+Этот сохранённый отчёт намеренно инвалидирован изменениями valuation/inventory pipeline v5 от 2026-09-13.
+Актуальные STATIC-PREFLIGHT.ps1 и HOTFIX-PREFLIGHT.ps1 автоматически запускаются START.bat на Windows до dotnet build.
 
-Новые проверки r4:
-- C# async ref/out compile trap (CS1988)
-- yooma `/card/<SteamID64>` marker
-- Chromium DevTools `--remote-debugging-port`
-- CDP `Network.responseReceived`
-- CDP `Network.getResponseBody`
-- CDP `Network.webSocketFrameReceived`
-- non-blocking browser probe gate
-- disposable browser profile
-- отсутствие `.github/workflows`
-- существующие XAML/XML/StaticResource/event/binding/DPI checks сохранены
+Ключевые проверки текущей ревизии:
+- XAML/XML/StaticResource/event/binding/WPF traps
+- Win32 ICO bounds / CS7065 trap
+- отсутствие C# async ref/out / CS1988 trap
+- exact SteamID pipeline yooma.su + CYBERSHOKE
+- monitoring batches: 10 servers / max 40 new scans / no 90s overlap
+- Steam inventory modern + legacy profile JSON fallback
+- serialized Steam Community requests + cooldown
+- multi-source CS2/Dota/Rust price pipeline
+- partial valuation cache protection
+- PriceEngineVersion 5 migration
+- Chromium CDP gate=1 / compact DOM / WebSocket capture
+- отсутствие .github/workflows
 
-Причина re-run: после последнего записанного PASS изменён RenderedDomLoader и усилен resolver DOM/XHR/WebSocket. Нельзя переносить старый PASS на новый исходный код без повторного запуска проверки.
-
-Запустите START.bat: STATIC-PREFLIGHT.txt будет перезаписан фактическим PASS/FAIL до dotnet build.
+Запустите START.bat: этот файл будет перезаписан фактическим STATIC-PREFLIGHT PASS/FAIL, затем HOTFIX-PREFLIGHT проверит runtime-source markers и только после этого запустится native dotnet build.
