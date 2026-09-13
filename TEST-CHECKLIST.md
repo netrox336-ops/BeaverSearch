@@ -1,79 +1,56 @@
 # BeaverSearch v0.4.1 FixSteamID — test checklist
 
-## Native build / startup
-
-- [ ] `START.bat` на Windows 10/11 x64 + .NET 8 SDK.
-- [ ] STATIC-PREFLIGHT = PASS.
-- [ ] HOTFIX-PREFLIGHT = PASS.
+## Build
+- [ ] `START.bat`: STATIC-PREFLIGHT PASS.
+- [ ] HOTFIX-PREFLIGHT PASS.
 - [ ] `dotnet build` = 0 errors.
-- [ ] MainWindow открывается без XamlParseException.
+- [ ] MainWindow запускается без XamlParseException.
 
-## Source resolver
+## Resolver / batches
+- [ ] yooma.su + CYBERSHOKE дают exact SteamID64 без угадывания по нику.
+- [ ] В UI только текущий batch до 10 community servers, а не 1000+ строк.
+- [ ] Следующий batch стартует только после полного завершения текущих player tasks.
+- [ ] Player valuation concurrency = 2; raw Steam inventory gate = 1.
+- [ ] Chromium probe = 1, cache 75s, compact DOM, BelowNormal priority.
 
-- [ ] yooma.su и CYBERSHOKE возвращают exact SteamID64 из DOM/API/WebSocket, без поиска по нику.
-- [ ] `/card/<SteamID64>` / `/profile/<SteamID64>` / explicit steam-account поля распознаются.
-- [ ] CYBERSHOKE DM roster даёт SteamID64 в player stream.
-- [ ] Один SteamID, найденный несколькими источниками, не запускает duplicate valuation одновременно.
+## Steam inventory presence v6
+- [ ] Обычная profile inventory page парсится через `g_rgAppContextData`.
+- [ ] Если `asset_count = 0` для игры, JSON inventory этой игры не запрашивается.
+- [ ] Presence cache = 20 минут.
+- [ ] Ошибка presence page не считается пустым inventory: выполняется обычный raw check.
 
-## Monitoring batch / anti-freeze
+## Steam raw inventory v6
+- [ ] Только modern endpoint `/inventory/<SteamID>/<appid>/2?count=2000`.
+- [ ] Legacy `/profiles/<SteamID>/inventory/json/...` полностью отсутствует.
+- [ ] Raw requests сериализованы и идут с normal spacing около 10 секунд.
+- [ ] После throttle spacing не меньше 15 секунд.
+- [ ] 429 включает cooldown минимум 90 секунд; 403 — минимум 60 секунд.
+- [ ] После 403/429 нет immediate retry.
+- [ ] `HTTP 401 + empty/null body` считается доступным пустым app inventory, а не auth/temp error.
+- [ ] Modern `assets/descriptions` и пагинация `more_items + last_assetid` корректны.
+- [ ] Явный private inventory остаётся inaccessible.
 
-- [ ] В UI одновременно находится текущая десятка community servers, а не 1000+ server rows.
-- [ ] `CommunityServerBatchSize = 10`.
-- [ ] Один batch планирует максимум 40 новых SteamID checks.
-- [ ] Следующий batch НЕ начинается через фиксированный timeout: программа ждёт полного завершения текущих player tasks.
-- [ ] Старые inventory tasks не продолжают копиться за следующими server batches.
-- [ ] Player valuation concurrency максимум 4.
-- [ ] Chromium probe максимум 1, cache 75 секунд, compact DOM, BelowNormal priority.
-- [ ] UI остаётся отзывчивым во время source refresh / inventory / pricing.
-- [ ] Stop Monitoring отменяет текущую работу и не оставляет бесконечную очередь.
+## Pricing v6
+- [ ] CS2 bulk source: SkinCash; Dota bulk source: market.dota2.net.
+- [ ] Skinport — secondary provider и не валит весь valuation при 403/5xx.
+- [ ] Steam Market — только last-resort fallback максимум для 4 имён.
+- [ ] Steam Market gate=1, pacing около 6 секунд, positive cache 30 минут.
+- [ ] Price source failure не записывает ложный успешный `0 ₽`.
 
-## Steam inventory — mandatory
+## Results / cache
+- [ ] Валидный CS2 MATCH сохраняется даже при temporary failure другой игры.
+- [ ] Partial result не записывается в 24h successful cache.
+- [ ] Пустой Rust/Dota inventory отображается как `0 items`, а не `401 Unauthorized`.
+- [ ] `PriceEngineVersion = 6`; old SteamChecks очищаются один раз, SteamID/name mappings сохраняются.
+- [ ] При CS2 filter `1..30000` подходящая ненулевая CS2 valuation попадает в Results.
 
-- [ ] Modern endpoint: `/inventory/<SteamID>/<appid>/2?count=1000`.
-- [ ] Legacy fallback: `/profiles/<SteamID>/inventory/json/<appid>/2`.
-- [ ] Перед legacy fallback выполняется anonymous profile inventory prime; пользовательские Edge/Chrome/Steam cookies не читаются.
-- [ ] Steam inventory requests глобально сериализованы (`gate=1`).
-- [ ] Normal spacing около 3 секунд, после 403/429 включается увеличенный cooldown/spacing.
-- [ ] Modern schema `assets/descriptions` связывается по `classid + instanceid`.
-- [ ] Legacy schema `rgInventory/rgDescriptions` связывается по `classid + instanceid`.
-- [ ] Modern pagination `more_items + last_assetid/start_assetid` работает.
-- [ ] Legacy pagination `more + more_start/start` работает.
-- [ ] `success`, `marketable`, pagination flags принимают bool/number/string формы.
-- [ ] Literal `null`, пустой body, 403/429, timeout, invalid JSON показываются как temporary failure с реальной причиной, а не как private `0 ₽`.
-- [ ] Явно закрытый/private inventory корректно остаётся inaccessible.
+## Regression по последнему runtime-логу
+- [ ] Больше нет `modern: ... | legacy: ...`.
+- [ ] Больше нет `partial valuation — Rust: HTTP 401 Unauthorized` для пустого Rust inventory.
+- [ ] Если появляется 429, дальнейшие raw inventory requests реально ждут cooldown.
+- [ ] Следующая десятка серверов не стартует поверх незавершённых inventory tasks.
 
-## Pricing — mandatory
-
-- [ ] CS2 primary bulk source — public SkinCash feed; USD конвертируется в RUB через CBR.
-- [ ] Dota primary bulk source — public market.dota2.net RUB feed.
-- [ ] Skinport используется как secondary source и получает `Accept-Encoding: br`.
-- [ ] Ошибка/403 одного bulk source не завершает весь player valuation исключением.
-- [ ] Отсутствующие `market_hash_name` ограниченно добираются Steam Community Market.
-- [ ] Steam Market fallback выполняется по одному запросу с pacing/cache, а не массовым Parallel.ForEach.
-- [ ] Если ни один price source не дал ни одной цены для непустого marketable inventory, игра помечается temporary failure, а не `0 ₽` success.
-- [ ] Common `market_hash_name` повторно используются из price cache.
-
-## Partial valuation / Results — mandatory
-
-- [ ] Успешный CS2 результат НЕ теряется, если Dota/Rust позже получили temporary Steam failure.
-- [ ] Если CS2 стоимость входит в заданный диапазон, такой игрок появляется в Results как `MATCH`, даже при partial Dota/Rust.
-- [ ] Partial result НЕ записывается в 24h successful SteamChecks и будет повторён позже.
-- [ ] Полностью успешный SteamID записывается в 24h cache и не пересканируется до TTL.
-- [ ] Реально пустой/non-marketable inventory может корректно иметь 0 ₽.
-- [ ] `PriceEngineVersion = 5`; после обновления старые `SteamChecks` очищаются автоматически, NameResolves/SteamID сохраняются.
-
-## Manual regression test
-
-- [ ] С Monitoring OFF проверить известный SteamID с публичным CS2 inventory.
-- [ ] CS2 показывает `items / marketable / без цены / цены OK`, а не `закрыт/недоступен`, если inventory получен.
-- [ ] При временном Steam throttle отображается конкретная modern/legacy причина, а не `null`.
-- [ ] При наличии известных marketable skins CS2 value > 0 ₽.
-- [ ] При фильтре CS2 `1..30000` подходящий результат даёт `Фильтр: CS2`.
-
-## Cache / repository / GUI
-
-- [ ] `cache.json` сохраняется debounce-окном и содержит `PriceEngineVersion: 5`.
-- [ ] Нижний sidebar background не растянут/не повреждён.
-- [ ] Application icon — BeaverSearch/beaver branding.
-- [ ] Нет `bin/`, `obj/`, `.vs/`, `.tmp` в репозитории.
-- [ ] `.github/workflows` отсутствует; GitHub Actions намеренно не используется.
+## Repository / GUI
+- [ ] BeaverSearch icon и sidebar background отображаются корректно.
+- [ ] В репозитории нет `bin/`, `obj/`, `.vs/`, `.tmp`.
+- [ ] `.github/workflows` отсутствует; GitHub Actions не используется.
